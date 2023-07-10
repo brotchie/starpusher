@@ -4,6 +4,8 @@ A Starpusher controls 4 x strips of APA102 LEDs (up to 420 LEDs per strip), taki
 
 A Starpush comprises a [WT32 ETH01](https://www.amazon.com/EC-Buying-WT32-ETH01-Development-Bluetooth/dp/B09Z298QJQ/ref=sr_1_5?crid=121WYGGG1S6LG&keywords=wt32+eth01&qid=1688881692&s=electronics&sprefix=wt32+eth01%2Celectronics%2C306&sr=1-5) with a custom-designed Starshield. The Starshield has a DIP switch that configures the Static IP address a given Starpusher uses and has headers for 4 LED strips.
 
+See the comments in [main/starpusher.c](main/starpusher.c) for a codebase guide.
+
 ## Development Environment
 Starshield code is built using the esp-idf toolchain.
 

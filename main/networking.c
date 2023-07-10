@@ -2,6 +2,7 @@
 #include <esp_event.h>
 #include <esp_log.h>
 #include <esp_netif.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/timers.h>
@@ -112,7 +113,12 @@ static void set_static_ip(esp_netif_t *netif, char *ip_address) {
 static void udp_watchdog_callback(TimerHandle_t xTimer) {
   ESP_LOGE(TAG, "UDP watchdog tripped");
   indicator_led_set(0);
-  buffered_led_strips_reset();
+  // If we haven't received UDP packets in a while, then turn off
+  // all of the LEDs.
+  if (buffered_led_strips_acquire_buffers_mutex()) {
+    buffered_led_strips_reset();
+    buffered_led_strips_release_buffers_mutex();
+  }
 }
 
 static void udp_discovery_callback(TimerHandle_t xTimer) {
@@ -183,6 +189,7 @@ static void udp_server_task(void *pvParameters) {
           ESP_LOGI(TAG, "UDP watchdog reset");
         }
         xTimerReset(udp_watchdog_timer, 0);
+
         indicator_led_set(1);
         process_udp_packet(rx_buffer, size);
       }

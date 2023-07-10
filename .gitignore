@@ -1,3 +1,4 @@
 build
-.swp
+*.swp
 .vscode
+*.old
