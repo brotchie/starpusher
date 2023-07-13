@@ -156,7 +156,8 @@ to apa102 LEDs.
                  frame per 16 LEDs is required to ensure all data is
                  clocked through the strip.
 */
-void buffered_led_strip_reset_buffer(buffered_led_strip_t *strip) {
+void buffered_led_strip_reset_buffer(
+    buffered_led_strip_t *strip, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   if (strip->raw_buffer == NULL) {
     return;
   }
@@ -166,7 +167,10 @@ void buffered_led_strip_reset_buffer(buffered_led_strip_t *strip) {
 
   // Sets the first byte of each LED frame to its default state (0xe0).
   for (uint32_t i = 0; i < strip->led_count; i++) {
-    strip->raw_buffer[FRAME_SIZE * (1 + i)] = 0xe0;
+    strip->raw_buffer[FRAME_SIZE * (1 + i)] = 0xe0 | (w >> 3);
+    strip->raw_buffer[FRAME_SIZE * (1 + i) + 1] = b;
+    strip->raw_buffer[FRAME_SIZE * (1 + i) + 2] = g;
+    strip->raw_buffer[FRAME_SIZE * (1 + i) + 3] = r;
   }
 
   // Sets all bits in the ends frames to one.
@@ -195,7 +199,7 @@ void buffered_led_strip_initialize(buffered_led_strip_t *strip) {
     ESP_LOGE(TAG, "Allocating memory for LED strip failed");
     return;
   }
-  buffered_led_strip_reset_buffer(strip);
+  buffered_led_strip_reset_buffer(strip, 0, 0, 0, 0);
 }
 
 void buffered_led_strip_deinitialize(buffered_led_strip_t *strip) {
@@ -457,9 +461,9 @@ void buffered_led_strips_update() {
 // Note, you must first acquire an exclusive lock on the LED strip buffers
 // before calling this function (using
 // buffered_led_strips_acquire_buffers_mutex).
-void buffered_led_strips_reset() {
+void buffered_led_strips_reset(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   for (uint8_t i = 0; i < LED_STRIP_COUNT; i++) {
-    buffered_led_strip_reset_buffer(&strips[i]);
+    buffered_led_strip_reset_buffer(&strips[i], r, g, b, w);
   }
 }
 
@@ -478,7 +482,6 @@ static void buffered_led_strips_update_task(void *params) {
     vTaskDelay(delay);
   }
 }
-
 
 void buffered_led_strips_start_update_task() {
   ESP_LOGI(TAG, "Starting update task...");

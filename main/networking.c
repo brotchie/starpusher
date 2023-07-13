@@ -13,6 +13,7 @@
 #include <lwip/sys.h>
 
 #include "buffered_led_strips.h"
+#include "networking.h"
 #include "peripherals.h"
 #include "udp_protocol.h"
 
@@ -116,7 +117,12 @@ static void udp_watchdog_callback(TimerHandle_t xTimer) {
   // If we haven't received UDP packets in a while, then turn off
   // all of the LEDs.
   if (buffered_led_strips_acquire_buffers_mutex()) {
-    buffered_led_strips_reset();
+    if (device_id == TEST_PATTERN_DEVICE_ID) {
+      // Device ID 15 UDP watchdog sets all colors to white.
+      buffered_led_strips_reset(255, 255, 255, 255);
+    } else {
+      buffered_led_strips_reset(0, 0, 0, 0);
+    }
     buffered_led_strips_release_buffers_mutex();
   }
 }
