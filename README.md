@@ -1,5 +1,7 @@
 # Starpusher
 
+![Starshield](images/starpusher_shot.jpg)
+
 A Starpusher controls 4 x strips of APA102 LEDs (up to 420 LEDs per strip), taking LED information via UDP ethernet packets. We've tested it to run 4 x 420 LED strips at 60FPS with no glitches.
 
 A Starpush comprises a [WT32 ETH01](https://www.amazon.com/EC-Buying-WT32-ETH01-Development-Bluetooth/dp/B09Z298QJQ/ref=sr_1_5?crid=121WYGGG1S6LG&keywords=wt32+eth01&qid=1688881692&s=electronics&sprefix=wt32+eth01%2Celectronics%2C306&sr=1-5) with a custom-designed Starshield. The Starshield has a DIP switch that configures the Static IP address a given Starpusher uses and has headers for 4 LED strips.
@@ -31,3 +33,17 @@ Do the following:
    `$ espefuse.py --do-not-confirm --port /dev/ttyUSBx set_flash_voltage 3.3V`
    \
    Replacing `/dev/ttyUSBx` with the port of your USB tty.
+
+## Starshield
+
+Schematics, gerber, BOM, and pick-and-place data for the Starshield V2 is in the `starshield` sub-folder.
+
+### Board Overview
+
+![Starshield Naked](images/starpusher_naked.png)
+
+### UART
+
+The WT32 ETH01 that the Starshield sits sits on can be progammed via a USB UART (all development was done with a [DSD TECH SH-U09C5](https://www.amazon.com/gp/product/B07WX2DSVB/)) which has RTS and DTR pins so that ESP-IDF can program the ESP32 without having to manually fiddle with jumpers / manual resets.
+
+![Starshield UART](images/starpusher_uart.png)
