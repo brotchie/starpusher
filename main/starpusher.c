@@ -1,5 +1,6 @@
 #include <inttypes.h>
 
+#include "common.h"
 #include "buffered_led_strips.h"
 #include "networking.h"
 #include "peripherals.h"
@@ -45,8 +46,10 @@ void app_main(void) {
   device_id_initialize();
   uint8_t device_id = device_id_get();
 
-  if (device_id == TEST_PATTERN_DEVICE_ID) {
+  if (device_id == WHITE_TEST_PATTERN_DEVICE_ID) {
     buffered_led_strips_reset(255, 255, 255, 255);
+  } else if (device_id == RAINBOW_CHASE_TEST_PATTERN_DEVICE_ID) {
+    buffered_led_strips_set_rainbow_chase(1);
   } else {
     buffered_led_strips_reset(0, 0, 0, 0);
   }

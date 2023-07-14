@@ -12,6 +12,7 @@
 #include <freertos/timers.h>
 
 #include "buffered_led_strips.h"
+#include "color.h"
 
 static const char *TAG = "buffered_led_strips";
 
@@ -73,6 +74,9 @@ SemaphoreHandle_t strip_buffers_mutex;
 SemaphoreHandle_t spi_mutex;
 
 buffered_led_strip_t strips[LED_STRIP_COUNT];
+
+// If true, then output a rainbow chase pattern.
+uint8_t rainbow_chase_state = 0;
 
 /* Initializes the OUT_SEL pin to the LED strip demultiplexers. */
 void output_select_initialize() {
@@ -223,6 +227,8 @@ size_t buffered_led_strip_safe_copy_to_dma_buffer(buffered_led_strip_t *strip,
 }
 
 void buffered_led_strips_initialize(uint32_t clock_speed_hz) {
+  fire_palette_initialize();
+  water_palette_initialize();
   ESP_LOGI(TAG,
            "Initializing %d x %d strips of LEDs. Driving LEDs at %luMhz.",
            LED_STRIP_COUNT,
@@ -467,6 +473,116 @@ void buffered_led_strips_reset(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   }
 }
 
+void buffered_led_strips_set_rainbow_chase(uint8_t state) {
+  rainbow_chase_state = state;
+}
+
+uint16_t rainbow_chase_cycle = 0;
+uint16_t animation_cycle = 0;
+uint8_t rainbow_chase_cycle_length = 128;
+
+#define VISUALIZATION_RAINBOW 0
+#define VISUALIZATION_FIRE 1
+#define VISUALIZATION_WATER 2
+#define VISUALIZATION_TWINKLE 3
+#define VISUALIZATION_TWINKLE_RACE 4
+#define VISUALIZATION_ALIEN 5
+
+uint8_t visualization_type = VISUALIZATION_TWINKLE_RACE;
+uint8_t visualization_brightness = 100;
+
+void buffered_led_strips_update_rainbow_chase() {
+  uint16_t led_count = strips[0].led_count;
+  animation_cycle++;
+  if (animation_cycle % 300 == 0) {
+    visualization_type++;
+    visualization_type %= 6;
+  }
+  if (visualization_type == 0) {
+    rainbow_chase_cycle++;
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < led_count; index++) {
+        double hue = (double)((index + rainbow_chase_cycle) %
+                              rainbow_chase_cycle_length) /
+                     (double)rainbow_chase_cycle_length;
+        rgb_t rgb = hsv_to_rgb(hue, 1.0, 1.0);
+        buffered_led_strip_set_pixel_value(&strips[strip],
+                                           index,
+                                           rgb.r,
+                                           rgb.g,
+                                           rgb.b,
+                                           visualization_brightness);
+      }
+    }
+  } else if (visualization_type == 1) {
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < led_count; index++) {
+        rgb_t rgb = fire_palette_get_pixel_value(index);
+        buffered_led_strip_set_pixel_value(&strips[strip],
+                                           index,
+                                           rgb.r,
+                                           rgb.g,
+                                           rgb.b,
+                                           visualization_brightness);
+      }
+    }
+    if (animation_cycle % 10 == 0) {
+      fire_palette_update_noise();
+    }
+  } else if (visualization_type == 2) {
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < led_count; index++) {
+        rgb_t rgb = water_palette_get_pixel_value(animation_cycle + index);
+        buffered_led_strip_set_pixel_value(&strips[strip],
+                                           index,
+                                           rgb.r,
+                                           rgb.g,
+                                           rgb.b,
+                                           visualization_brightness);
+      }
+    }
+  } else if (visualization_type == 3) {
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < led_count; index++) {
+        rgb_t rgb = twinkle_buffer_get_pixel_value(index);
+        buffered_led_strip_set_pixel_value(&strips[strip],
+                                           index,
+                                           rgb.r,
+                                           rgb.g,
+                                           rgb.b,
+                                           visualization_brightness);
+      }
+    }
+    twinkle_buffer_tick();
+  } else if (visualization_type == 4) {
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < led_count; index++) {
+        rgb_t rgb = twinkle_buffer_get_pixel_value(index + animation_cycle);
+        buffered_led_strip_set_pixel_value(&strips[strip],
+                                           index,
+                                           rgb.r,
+                                           rgb.g,
+                                           rgb.b,
+                                           visualization_brightness);
+      }
+    }
+    twinkle_buffer_tick();
+  } else if (visualization_type == 5) {
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < led_count; index++) {
+        rgb_t rgb = alien_buffer_get_pixel_value(index);
+        buffered_led_strip_set_pixel_value(&strips[strip],
+                                           index,
+                                           rgb.r,
+                                           rgb.g,
+                                           rgb.b,
+                                           visualization_brightness);
+      }
+    }
+    alien_buffer_tick(animation_cycle);
+  }
+}
+
 static void buffered_led_strips_update_task(void *params) {
   // We could possibly just hot-loop here without delay, since
   // we only acquire a lock on LED strip buffers for a short time
@@ -475,6 +591,12 @@ static void buffered_led_strips_update_task(void *params) {
   // yield for 1ms each frame.
   const TickType_t delay = 1 / portTICK_PERIOD_MS;
   for (;;) {
+    if (rainbow_chase_state == 1) {
+      if (buffered_led_strips_acquire_buffers_mutex()) {
+        buffered_led_strips_update_rainbow_chase();
+        buffered_led_strips_release_buffers_mutex();
+      }
+    }
     if (xSemaphoreTake(spi_mutex, portMAX_DELAY) == pdTRUE) {
       buffered_led_strips_update();
       xSemaphoreGive(spi_mutex);
