@@ -49,7 +49,7 @@ void app_main(void) {
   if (device_id == WHITE_TEST_PATTERN_DEVICE_ID) {
     buffered_led_strips_reset(255, 255, 255, 255);
   } else if (device_id == RAINBOW_CHASE_TEST_PATTERN_DEVICE_ID) {
-    buffered_led_strips_set_rainbow_chase(1);
+    buffered_led_strips_set_vizualiations(1);
   } else {
     buffered_led_strips_reset(0, 0, 0, 0);
   }

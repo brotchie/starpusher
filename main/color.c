@@ -161,3 +161,82 @@ void alien_buffer_tick(uint16_t animation_cycle) {
     alien_buffer[ALIEN_BUFFER_SIZE - 1] = first;
   }
 }
+
+#define PROB_WEIGHT_FLASH_BUFFER_SIZE 128
+
+int16_t prob_weight_buffer[PROB_WEIGHT_FLASH_BUFFER_SIZE] = {0};
+double positive_target_h = 0.75;
+double negative_target_h = 0.25;
+double positive_h = 0.75;
+double negative_h = 0.25;
+
+rgb_t prob_weight_buffer_get_pixel_value(uint16_t index) {
+  int16_t weight = prob_weight_buffer[index % PROB_WEIGHT_FLASH_BUFFER_SIZE];
+  rgb_t color = hsv_to_rgb(positive_h, 1.0, 1.0);
+  if (weight < 0) {
+    weight = -weight;
+    color = hsv_to_rgb(negative_h, 1.0, 1.0);
+  }
+  if (weight == 255 || rand() % (255 - weight) == 0) {
+    return color;
+  }
+  rgb_t black = {.r = 0, .g = 0, .b = 0};
+  return black;
+}
+
+void prob_weight_buffer_tick(uint16_t animation_cycle) {
+  if (animation_cycle % 120 == 0) {
+    negative_target_h = (double)(rand() % 255) / 255.0;
+    positive_target_h = (double)(rand() % 255) / 255.0;
+  }
+  float negative_target_delta = negative_target_h - negative_h;
+  float positive_target_delta = positive_target_h - positive_h;
+  negative_h += 0.01 * negative_target_delta;
+  positive_h += 0.01 * positive_target_delta;
+  for (uint16_t i = 0; i < PROB_WEIGHT_FLASH_BUFFER_SIZE; i++) {
+    prob_weight_buffer[i] =
+        255 *
+        sinf(0.02 * animation_cycle +
+             2 * 3.1415 * (float)i / (float)PROB_WEIGHT_FLASH_BUFFER_SIZE);
+  }
+}
+
+#define COLOR_LIGHTNING_BUFFER_SIZE 64
+
+rgb_t last_color_lightning;
+rgb_t current_color_lightning;
+uint16_t ticks_since_last_color_lightning = 0;
+uint16_t second_shot_countdown = 0;
+
+rgb_t color_lightning_get_pixel_value(uint16_t index) {
+  if (ticks_since_last_color_lightning == 5 || ticks_since_last_color_lightning == 8) {
+    rgb_t white = {.r = 255, .g = 255, .b = 255};
+    return white;
+  } 
+  if (ticks_since_last_color_lightning == 6 || ticks_since_last_color_lightning == 7) {
+    rgb_t black = {.r = 0, .g = 0, .b = 0};
+    return black;
+  } else {
+    return current_color_lightning;
+  }
+}
+
+void color_lightning_tick(uint16_t animation_cycle) {
+  ticks_since_last_color_lightning++;
+  current_color_lightning.r *= 0.95;
+  current_color_lightning.g *= 0.95;
+  current_color_lightning.b *= 0.95;
+  if (second_shot_countdown > 0) {
+    second_shot_countdown--;
+  }
+  if (second_shot_countdown == 1) {
+    current_color_lightning = last_color_lightning;
+    ticks_since_last_color_lightning = 0;
+  } else if (second_shot_countdown == 0 &&
+             rand() % (200 - ticks_since_last_color_lightning) == 0) {
+    ticks_since_last_color_lightning = 0;
+    last_color_lightning = hsv_to_rgb((double)(rand() % 255) / 255.0, 1.0, 1.0);
+    current_color_lightning = last_color_lightning;
+    second_shot_countdown = rand() % 30 + 15;
+  }
+}

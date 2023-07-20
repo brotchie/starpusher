@@ -26,4 +26,9 @@ void twinkle_buffer_tick();
 rgb_t alien_buffer_get_pixel_value(uint16_t index);
 void alien_buffer_tick(uint16_t animation_cycle);
 
+rgb_t prob_weight_buffer_get_pixel_value(uint16_t index);
+void prob_weight_buffer_tick(uint16_t animation_cycle);
+
+rgb_t color_lightning_get_pixel_value(uint16_t index);
+void color_lightning_tick(uint16_t animation_cycle);
 #endif

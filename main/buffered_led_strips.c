@@ -40,16 +40,26 @@ static const char *TAG = "buffered_led_strips";
 // LED strips configuration.
 #define FRAME_SIZE 4
 #define LED_STRIP_COUNT 4
-#define PER_STRIP_LED_COUNT 420
+#define PER_STRIP_LED_COUNT 128
 
 // 2Mhz is enough to get 60 FPS for 4x 420 LED strips.
-#define DEFAULT_CLOCK_SPEED_HZ 2000000
+#define DEFAULT_APA102_CLOCK_SPEED_HZ 2000000
+#define REQUIRED_WS2812B_CLOCK_SPEED_HZ 3000000
+
+// Aim for 60 FPS.
+const TickType_t update_frequency = 60;
 
 TaskHandle_t update_task_handle;
+
+typedef enum {
+  LED_DEVICE_APA102 = 0,
+  LED_DEVICE_WS2812B = 1,
+} led_device_type_t;
 
 typedef uint8_t output_select_state;
 
 typedef struct {
+  led_device_type_t device_type;
   spi_device_handle_t *spi_device;
   output_select_state output_select;
   uint16_t led_count;
@@ -76,7 +86,10 @@ SemaphoreHandle_t spi_mutex;
 buffered_led_strip_t strips[LED_STRIP_COUNT];
 
 // If true, then output a rainbow chase pattern.
-uint8_t rainbow_chase_state = 0;
+bool vizualizations_state = false;
+
+void buffered_led_strip_reset_buffer(
+    buffered_led_strip_t *strip, uint8_t r, uint8_t g, uint8_t b, uint8_t w);
 
 /* Initializes the OUT_SEL pin to the LED strip demultiplexers. */
 void output_select_initialize() {
@@ -117,6 +130,9 @@ void spi_device_initialize(spi_host_device_t host_id,
       .clock_speed_hz = clock_speed_hz,
       .spics_io_num = -1,
       .queue_size = 7,
+      .command_bits = 0,
+      .address_bits = 0,
+      .dummy_bits = 0,
   };
   ret = spi_bus_add_device(host_id, &devcfg, spi_dev);
   ESP_ERROR_CHECK(ret);
@@ -143,45 +159,8 @@ void spi_device_deinitialize(spi_host_device_t host_id,
 // all ones for every 16 LEDs on the strip. This function
 // calculates the required end frames and then adds one
 // extra for luck.
-uint8_t calculate_end_frame_count(uint16_t led_count) {
+uint8_t calculate_apa102_end_frame_count(uint16_t led_count) {
   return (led_count / 16) + 1;
-}
-
-/* Reset's a LED strip's buffer to turn all LEDs off.
-
-The DMA buffer contains the raw wire format for signalling
-to apa102 LEDs.
-
-    0x00000000 - 4 byte start frame of zeros
-    0xewbbggrr - 4 byte led frame always starting with two ones (0xe0)
-                 with the lower 6 bits of this first byte being
-                 pwm brightness. The following bytes are bgr colors.
-    0xffffffff - One of more end frames at least one additional end
-                 frame per 16 LEDs is required to ensure all data is
-                 clocked through the strip.
-*/
-void buffered_led_strip_reset_buffer(
-    buffered_led_strip_t *strip, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
-  if (strip->raw_buffer == NULL) {
-    return;
-  }
-
-  // Completely reset the buffer to zeros.
-  memset(strip->raw_buffer, 0, strip->raw_buffer_size);
-
-  // Sets the first byte of each LED frame to its default state (0xe0).
-  for (uint32_t i = 0; i < strip->led_count; i++) {
-    strip->raw_buffer[FRAME_SIZE * (1 + i)] = 0xe0 | (w >> 3);
-    strip->raw_buffer[FRAME_SIZE * (1 + i) + 1] = b;
-    strip->raw_buffer[FRAME_SIZE * (1 + i) + 2] = g;
-    strip->raw_buffer[FRAME_SIZE * (1 + i) + 3] = r;
-  }
-
-  // Sets all bits in the ends frames to one.
-  uint16_t end_frame_count = calculate_end_frame_count(strip->led_count);
-  size_t end_frame_start = FRAME_SIZE * (1 + strip->led_count);
-  size_t end_frame_size = FRAME_SIZE * end_frame_count;
-  memset(strip->raw_buffer + end_frame_start, 0xff, end_frame_size);
 }
 
 /* Initializes an led strip, allocating its DMA buffer.
@@ -194,15 +173,28 @@ void buffered_led_strip_initialize(buffered_led_strip_t *strip) {
     return;
   }
 
-  uint16_t end_frame_count = calculate_end_frame_count(strip->led_count);
-  size_t raw_buffer_size =
-      FRAME_SIZE * (1 + strip->led_count + end_frame_count);
-  strip->raw_buffer_size = raw_buffer_size;
-  strip->raw_buffer = heap_caps_malloc(raw_buffer_size, MALLOC_CAP_8BIT);
+  if (strip->device_type == LED_DEVICE_APA102) {
+    uint16_t end_frame_count =
+        calculate_apa102_end_frame_count(strip->led_count);
+    size_t raw_buffer_size =
+        FRAME_SIZE * (1 + strip->led_count + end_frame_count);
+    strip->raw_buffer_size = raw_buffer_size;
+  } else if (strip->device_type == LED_DEVICE_WS2812B) {
+    // We're abusing the SPI data pin to clock out the WS2812B wire
+    // format. One logical bit sent to the WS2812B strip is actually
+    // three physical SPI bits.
+    //
+    // Each LED on the strip takes 24bits of data ordered g, r, b.
+    // 3 x 24 is 8*9 so it will always be evenly divisible by 8.
+    strip->raw_buffer_size = (3 * 24 * strip->led_count) / 8;
+  }
+
+  strip->raw_buffer = heap_caps_malloc(strip->raw_buffer_size, MALLOC_CAP_8BIT);
   if (strip->raw_buffer == NULL) {
     ESP_LOGE(TAG, "Allocating memory for LED strip failed");
     return;
   }
+
   buffered_led_strip_reset_buffer(strip, 0, 0, 0, 0);
 }
 
@@ -229,6 +221,39 @@ size_t buffered_led_strip_safe_copy_to_dma_buffer(buffered_led_strip_t *strip,
 void buffered_led_strips_initialize(uint32_t clock_speed_hz) {
   fire_palette_initialize();
   water_palette_initialize();
+
+  // LED0 port
+  strips[0].device_type = LED_DEVICE_WS2812B;
+  strips[0].output_select = OUTPUT_SELECT_LED0_LED2;
+  strips[0].led_count = PER_STRIP_LED_COUNT;
+
+  // LED1 port
+  strips[1].device_type = LED_DEVICE_WS2812B;
+  strips[1].output_select = OUTPUT_SELECT_LED1_LED3;
+  strips[1].led_count = PER_STRIP_LED_COUNT;
+
+  // LED2 port
+  strips[2].device_type = LED_DEVICE_WS2812B;
+  strips[2].output_select = OUTPUT_SELECT_LED0_LED2;
+  strips[2].led_count = PER_STRIP_LED_COUNT;
+
+  // LED3 port
+  strips[3].device_type = LED_DEVICE_WS2812B;
+  strips[3].output_select = OUTPUT_SELECT_LED1_LED3;
+  strips[3].led_count = PER_STRIP_LED_COUNT;
+
+  // If any of the attached strips are WS2812B, we have to use a 3Mhz clock
+  // speed.
+  for (uint8_t i = 0; i < LED_STRIP_COUNT; i++) {
+    if (strips[i].device_type == LED_DEVICE_WS2812B) {
+      ESP_LOGI(TAG,
+               "Using required WS2812B clock speed: %dMhz",
+               REQUIRED_WS2812B_CLOCK_SPEED_HZ / 1000000);
+      clock_speed_hz = REQUIRED_WS2812B_CLOCK_SPEED_HZ;
+      break;
+    }
+  }
+
   ESP_LOGI(TAG,
            "Initializing %d x %d strips of LEDs. Driving LEDs at %luMhz.",
            LED_STRIP_COUNT,
@@ -244,28 +269,12 @@ void buffered_led_strips_initialize(uint32_t clock_speed_hz) {
 
   spi_device_initialize(
       SPI2_HOST, &spi2, clock_speed_hz, SPI2_MOSI_GPIO, SPI2_CLK_GPIO);
+  strips[0].spi_device = &spi2;
+  strips[1].spi_device = &spi2;
   spi_device_initialize(
       SPI3_HOST, &spi3, clock_speed_hz, SPI3_MOSI_GPIO, SPI3_CLK_GPIO);
-
-  // LED0 port
-  strips[0].spi_device = &spi2;
-  strips[0].output_select = OUTPUT_SELECT_LED0_LED2;
-  strips[0].led_count = PER_STRIP_LED_COUNT;
-
-  // LED1 port
-  strips[1].spi_device = &spi2;
-  strips[1].output_select = OUTPUT_SELECT_LED1_LED3;
-  strips[1].led_count = PER_STRIP_LED_COUNT;
-
-  // LED2 port
   strips[2].spi_device = &spi3;
-  strips[2].output_select = OUTPUT_SELECT_LED0_LED2;
-  strips[2].led_count = PER_STRIP_LED_COUNT;
-
-  // LED3 port
   strips[3].spi_device = &spi3;
-  strips[3].output_select = OUTPUT_SELECT_LED1_LED3;
-  strips[3].led_count = PER_STRIP_LED_COUNT;
 
   for (uint8_t i = 0; i < LED_STRIP_COUNT; i++) {
     buffered_led_strip_initialize(&strips[i]);
@@ -288,7 +297,7 @@ void buffered_led_strips_initialize(uint32_t clock_speed_hz) {
 
 // Initializes all the machinery to drive LED strips (using default SPI speed).
 void buffered_led_strips_initialize_default() {
-  buffered_led_strips_initialize(DEFAULT_CLOCK_SPEED_HZ);
+  buffered_led_strips_initialize(DEFAULT_APA102_CLOCK_SPEED_HZ);
 }
 
 // Cleans up all of the machinery to drive LED strips.
@@ -358,10 +367,92 @@ void buffered_led_strip_set_pixel_value(buffered_led_strip_t *strip,
     ESP_LOGE(TAG, "Invalid index on LED strip");
     return;
   }
-  strip->raw_buffer[FRAME_SIZE * (1 + index)] = 0xe0 | (w >> 3);
-  strip->raw_buffer[FRAME_SIZE * (1 + index) + 1] = b;
-  strip->raw_buffer[FRAME_SIZE * (1 + index) + 2] = g;
-  strip->raw_buffer[FRAME_SIZE * (1 + index) + 3] = r;
+  if (strip->device_type == LED_DEVICE_APA102) {
+    strip->raw_buffer[FRAME_SIZE * (1 + index)] = 0xe0 | (w >> 3);
+    strip->raw_buffer[FRAME_SIZE * (1 + index) + 1] = b;
+    strip->raw_buffer[FRAME_SIZE * (1 + index) + 2] = g;
+    strip->raw_buffer[FRAME_SIZE * (1 + index) + 3] = r;
+  } else if (strip->device_type == LED_DEVICE_WS2812B) {
+    uint32_t start_index = 3 * 24 * index;
+    uint8_t scaled_g = g * ((float)w / 255.0);
+    uint8_t scaled_r = r * ((float)w / 255.0);
+    uint8_t scaled_b = b * ((float)w / 255.0);
+    for (int i = 0; i < 8; i++) {
+      uint8_t g_bit = (scaled_g >> (7 - i)) & 0x01;
+      uint8_t r_bit = (scaled_r >> (7 - i)) & 0x01;
+      uint8_t b_bit = (scaled_b >> (7 - i)) & 0x01;
+
+      uint32_t g_byte_index = (start_index + i * 3 + 1) / 8;
+      uint32_t g_bit_index = (start_index + i * 3 + 1) % 8;
+
+      uint32_t r_byte_index = (start_index + (i + 8) * 3 + 1) / 8;
+      uint32_t r_bit_index = (start_index + (i + 8) * 3 + 1) % 8;
+
+      uint32_t b_byte_index = (start_index + (i + 16) * 3 + 1) / 8;
+      uint32_t b_bit_index = (start_index + (i + 16) * 3 + 1) % 8;
+
+      if (g_bit) {
+        strip->raw_buffer[g_byte_index] |= (1 << (7 - g_bit_index));
+      } else {
+        strip->raw_buffer[g_byte_index] &= ~(1 << (7 - g_bit_index));
+      }
+
+      if (r_bit) {
+        strip->raw_buffer[r_byte_index] |= (1 << (7 - r_bit_index));
+      } else {
+        strip->raw_buffer[r_byte_index] &= ~(1 << (7 - r_bit_index));
+      }
+
+      if (b_bit) {
+        strip->raw_buffer[b_byte_index] |= (1 << (7 - b_bit_index));
+      } else {
+        strip->raw_buffer[b_byte_index] &= ~(1 << (7 - b_bit_index));
+      }
+    }
+  }
+}
+
+/* Reset's a LED strip's buffer to turn all LEDs off.
+
+The DMA buffer contains the raw wire format for signalling
+to apa102 LEDs.
+
+    0x00000000 - 4 byte start frame of zeros
+    0xewbbggrr - 4 byte led frame always starting with two ones (0xe0)
+                 with the lower 6 bits of this first byte being
+                 pwm brightness. The following bytes are bgr colors.
+    0xffffffff - One of more end frames at least one additional end
+                 frame per 16 LEDs is required to ensure all data is
+                 clocked through the strip.
+*/
+void buffered_led_strip_reset_buffer(
+    buffered_led_strip_t *strip, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
+  if (strip->raw_buffer == NULL) {
+    return;
+  }
+
+  // Completely reset the buffer to zeros.
+  memset(strip->raw_buffer, 0, strip->raw_buffer_size);
+
+  if (strip->device_type == LED_DEVICE_APA102) {
+    // For APA102 all bits in the ends frames to one.
+    uint16_t end_frame_count =
+        calculate_apa102_end_frame_count(strip->led_count);
+    size_t end_frame_start = FRAME_SIZE * (1 + strip->led_count);
+    size_t end_frame_size = FRAME_SIZE * end_frame_count;
+    memset(strip->raw_buffer + end_frame_start, 0xff, end_frame_size);
+  } else if (strip->device_type == LED_DEVICE_WS2812B) {
+    // For WS2812B set the first bit of every 3 bits to one (zero).
+    for (uint32_t i = 0; i < 8 * strip->raw_buffer_size; i += 3) {
+      uint32_t byte_index = i / 8;
+      uint8_t bit_index = i % 8;
+      strip->raw_buffer[byte_index] |= (1 << (7 - bit_index));
+    }
+  }
+  // Sets the first byte of each LED frame to its reset value.
+  for (uint32_t i = 0; i < strip->led_count; i++) {
+    buffered_led_strip_set_pixel_value(strip, i, r, g, b, w);
+  }
 }
 
 // Sets the r, g, b, and brightness value of a LED at index on the
@@ -449,11 +540,11 @@ void buffered_led_strips_update() {
   uint64_t start_micros = esp_timer_get_time();
   buffered_led_strips_update_for_output_select(
       OUTPUT_SELECT_LED0_LED2, &strips[0], &strips[2]);
-  buffered_led_strips_update_for_output_select(
-      OUTPUT_SELECT_LED1_LED3, &strips[1], &strips[3]);
+  // buffered_led_strips_update_for_output_select(
+  //   OUTPUT_SELECT_LED1_LED3, &strips[1], &strips[3]);
   uint64_t end_micros = esp_timer_get_time();
   double duration_millis = (end_micros - start_micros) / 1000.0;
-  if (update_ticks % 240 == 0) {
+  if (update_ticks % 600 == 0) {
     ESP_LOGI(TAG,
              "Output for %d strips took %.2fms, achievable FPS %.2f",
              LED_STRIP_COUNT,
@@ -473,8 +564,8 @@ void buffered_led_strips_reset(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   }
 }
 
-void buffered_led_strips_set_rainbow_chase(uint8_t state) {
-  rainbow_chase_state = state;
+void buffered_led_strips_set_vizualiations(bool state) {
+  vizualizations_state = state;
 }
 
 uint16_t rainbow_chase_cycle = 0;
@@ -487,16 +578,18 @@ uint8_t rainbow_chase_cycle_length = 128;
 #define VISUALIZATION_TWINKLE 3
 #define VISUALIZATION_TWINKLE_RACE 4
 #define VISUALIZATION_ALIEN 5
+#define VISUALIZATION_PROB_WEIGHT 6
+#define VISUALIZATION_COLOR_LIGHTNING 7
 
-uint8_t visualization_type = VISUALIZATION_TWINKLE_RACE;
-uint8_t visualization_brightness = 100;
+uint8_t visualization_type = VISUALIZATION_COLOR_LIGHTNING;
+uint8_t visualization_brightness = 150;
 
-void buffered_led_strips_update_rainbow_chase() {
+void buffered_led_strips_update_vizualizations() {
   uint16_t led_count = strips[0].led_count;
   animation_cycle++;
-  if (animation_cycle % 300 == 0) {
+  if (animation_cycle % 600 == 0) {
     visualization_type++;
-    visualization_type %= 6;
+    visualization_type %= 8;
   }
   if (visualization_type == 0) {
     rainbow_chase_cycle++;
@@ -580,6 +673,32 @@ void buffered_led_strips_update_rainbow_chase() {
       }
     }
     alien_buffer_tick(animation_cycle);
+  } else if (visualization_type == 6) {
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < led_count; index++) {
+        rgb_t rgb = prob_weight_buffer_get_pixel_value(index);
+        buffered_led_strip_set_pixel_value(&strips[strip],
+                                           index,
+                                           rgb.r,
+                                           rgb.g,
+                                           rgb.b,
+                                           visualization_brightness);
+      }
+    }
+    prob_weight_buffer_tick(animation_cycle);
+  } else if (visualization_type == 7) {
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < led_count; index++) {
+        rgb_t rgb = color_lightning_get_pixel_value(index);
+        buffered_led_strip_set_pixel_value(&strips[strip],
+                                           index,
+                                           rgb.r,
+                                           rgb.g,
+                                           rgb.b,
+                                           visualization_brightness);
+      }
+    }
+    color_lightning_tick(animation_cycle);
   }
 }
 
@@ -587,13 +706,18 @@ static void buffered_led_strips_update_task(void *params) {
   // We could possibly just hot-loop here without delay, since
   // we only acquire a lock on LED strip buffers for a short time
   // while we memcpy them into the SPI DMA buffers, and we're
-  // the only task running on CPU1. Just to be safe, however, we
-  // yield for 1ms each frame.
-  const TickType_t delay = 1 / portTICK_PERIOD_MS;
+  // the only task running on CPU1. Just to be safe, however, we to
+  // output a steady 60Hz output.
+  ESP_LOGI(TAG, "Targeting LED updates at ~%ldHz: %ldms update period", update_frequency, 1000/update_frequency);
+  TickType_t last_wake_time;
+  TickType_t delay_ticks = (1000 / update_frequency) / portTICK_PERIOD_MS;
+  last_wake_time = xTaskGetTickCount();
   for (;;) {
-    if (rainbow_chase_state == 1) {
+    vTaskDelayUntil(&last_wake_time, delay_ticks);
+
+    if (vizualizations_state) {
       if (buffered_led_strips_acquire_buffers_mutex()) {
-        buffered_led_strips_update_rainbow_chase();
+        buffered_led_strips_update_vizualizations();
         buffered_led_strips_release_buffers_mutex();
       }
     }
@@ -601,7 +725,6 @@ static void buffered_led_strips_update_task(void *params) {
       buffered_led_strips_update();
       xSemaphoreGive(spi_mutex);
     }
-    vTaskDelay(delay);
   }
 }
 

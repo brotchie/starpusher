@@ -2,6 +2,7 @@
 #define BUFFERED_LED_STRIPS_H
 
 #include <inttypes.h>
+#include <stdbool.h>
 
 void buffered_led_strips_initialize_default();
 void buffered_led_strips_safe_reconfigure(uint32_t clock_speed_hz);
@@ -13,6 +14,6 @@ void buffered_led_strips_set_pixel_value(
 uint8_t buffered_led_strips_acquire_buffers_mutex();
 void buffered_led_strips_release_buffers_mutex();
 void buffered_led_strips_start_update_task();
-void buffered_led_strips_set_rainbow_chase(uint8_t state);
+void buffered_led_strips_set_vizualiations(bool state);
 
 #endif
