@@ -85,7 +85,6 @@ void perlin_get_pixel_values(perlin_vizualization_t *viz,
     min = fmin(min, n);
     min = fmin(min, k);
   }
-  printf("%f %f\n", max, min);
 }
 
 void perlin_tick(perlin_vizualization_t *viz, uint32_t animation_cycle){

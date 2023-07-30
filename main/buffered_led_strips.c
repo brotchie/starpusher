@@ -13,6 +13,7 @@
 
 #include "buffered_led_strips.h"
 #include "color.h"
+#include "vizualizations/viz.h"
 
 static const char *TAG = "buffered_led_strips";
 
@@ -40,7 +41,7 @@ static const char *TAG = "buffered_led_strips";
 // LED strips configuration.
 #define FRAME_SIZE 4
 #define LED_STRIP_COUNT 4
-#define PER_STRIP_LED_COUNT 128
+#define PER_STRIP_LED_COUNT 420
 
 // 2Mhz is enough to get 60 FPS for 4x 420 LED strips.
 #define DEFAULT_APA102_CLOCK_SPEED_HZ 2000000
@@ -223,22 +224,22 @@ void buffered_led_strips_initialize(uint32_t clock_speed_hz) {
   water_palette_initialize();
 
   // LED0 port
-  strips[0].device_type = LED_DEVICE_WS2812B;
+  strips[0].device_type = LED_DEVICE_APA102;
   strips[0].output_select = OUTPUT_SELECT_LED0_LED2;
   strips[0].led_count = PER_STRIP_LED_COUNT;
 
   // LED1 port
-  strips[1].device_type = LED_DEVICE_WS2812B;
+  strips[1].device_type = LED_DEVICE_APA102;
   strips[1].output_select = OUTPUT_SELECT_LED1_LED3;
   strips[1].led_count = PER_STRIP_LED_COUNT;
 
   // LED2 port
-  strips[2].device_type = LED_DEVICE_WS2812B;
+  strips[2].device_type = LED_DEVICE_APA102;
   strips[2].output_select = OUTPUT_SELECT_LED0_LED2;
   strips[2].led_count = PER_STRIP_LED_COUNT;
 
   // LED3 port
-  strips[3].device_type = LED_DEVICE_WS2812B;
+  strips[3].device_type = LED_DEVICE_APA102;
   strips[3].output_select = OUTPUT_SELECT_LED1_LED3;
   strips[3].led_count = PER_STRIP_LED_COUNT;
 
@@ -540,8 +541,8 @@ void buffered_led_strips_update() {
   uint64_t start_micros = esp_timer_get_time();
   buffered_led_strips_update_for_output_select(
       OUTPUT_SELECT_LED0_LED2, &strips[0], &strips[2]);
-  // buffered_led_strips_update_for_output_select(
-  //   OUTPUT_SELECT_LED1_LED3, &strips[1], &strips[3]);
+  buffered_led_strips_update_for_output_select(
+      OUTPUT_SELECT_LED1_LED3, &strips[1], &strips[3]);
   uint64_t end_micros = esp_timer_get_time();
   double duration_millis = (end_micros - start_micros) / 1000.0;
   if (update_ticks % 600 == 0) {
@@ -568,138 +569,53 @@ void buffered_led_strips_set_vizualiations(bool state) {
   vizualizations_state = state;
 }
 
-uint16_t rainbow_chase_cycle = 0;
-uint16_t animation_cycle = 0;
-uint8_t rainbow_chase_cycle_length = 128;
+uint8_t visualization_brightness = 255;
 
-#define VISUALIZATION_RAINBOW 0
-#define VISUALIZATION_FIRE 1
-#define VISUALIZATION_WATER 2
-#define VISUALIZATION_TWINKLE 3
-#define VISUALIZATION_TWINKLE_RACE 4
-#define VISUALIZATION_ALIEN 5
-#define VISUALIZATION_PROB_WEIGHT 6
-#define VISUALIZATION_COLOR_LIGHTNING 7
-
-uint8_t visualization_type = VISUALIZATION_COLOR_LIGHTNING;
-uint8_t visualization_brightness = 150;
+vizualization_t *vizualizations[11] = {0};
+vizualization_t *viz = NULL;
+uint8_t viz_index = 0;
+uint32_t animation_cycle = 0;
+rgb_t pixels[PER_STRIP_LED_COUNT];
 
 void buffered_led_strips_update_vizualizations() {
-  uint16_t led_count = strips[0].led_count;
+  if (vizualizations[0] == 0) {
+    vizualizations[0] = rainbow_vizualization();
+    vizualizations[1] = fire_vizualization();
+    vizualizations[2] = water_vizualization();
+    vizualizations[3] =
+        twinkle_vizualization((twinkle_config_t){.race = false});
+    vizualizations[4] = twinkle_vizualization((twinkle_config_t){.race = true});
+    vizualizations[5] = alien_vizualization();
+    vizualizations[6] = sinusoidal_vizualization();
+    vizualizations[7] = lightning_vizualization();
+    vizualizations[8] = police_vizualization();
+    vizualizations[9] = lasers_vizualization();
+    vizualizations[10] = perlin_vizualization();
+  }
+  led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
+  if (viz == NULL) {
+    viz = vizualizations[viz_index];
+    viz->initialize(viz, led_info);
+  }
+  if (animation_cycle % 300 == 0) {
+    if (viz != NULL) {
+      viz->deinitialize(viz);
+    }
+    viz_index++;
+    viz_index %= 11;
+    viz = vizualizations[viz_index];
+    viz->initialize(viz, led_info);
+  }
+  viz->tick(viz, animation_cycle);
+  viz->get_pixel_values(viz, pixels, PER_STRIP_LED_COUNT);
+  for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+    for (uint16_t index = 0; index < PER_STRIP_LED_COUNT; index++) {
+      rgb_t rgb = pixels[index];
+      buffered_led_strips_set_pixel_value(
+          strip, index, rgb.r, rgb.g, rgb.b, visualization_brightness);
+    }
+  }
   animation_cycle++;
-  if (animation_cycle % 600 == 0) {
-    visualization_type++;
-    visualization_type %= 8;
-  }
-  if (visualization_type == 0) {
-    rainbow_chase_cycle++;
-    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-      for (uint16_t index = 0; index < led_count; index++) {
-        double hue = (double)((index + rainbow_chase_cycle) %
-                              rainbow_chase_cycle_length) /
-                     (double)rainbow_chase_cycle_length;
-        rgb_t rgb = hsv_to_rgb(hue, 1.0, 1.0);
-        buffered_led_strip_set_pixel_value(&strips[strip],
-                                           index,
-                                           rgb.r,
-                                           rgb.g,
-                                           rgb.b,
-                                           visualization_brightness);
-      }
-    }
-  } else if (visualization_type == 1) {
-    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-      for (uint16_t index = 0; index < led_count; index++) {
-        rgb_t rgb = fire_palette_get_pixel_value(index);
-        buffered_led_strip_set_pixel_value(&strips[strip],
-                                           index,
-                                           rgb.r,
-                                           rgb.g,
-                                           rgb.b,
-                                           visualization_brightness);
-      }
-    }
-    if (animation_cycle % 10 == 0) {
-      fire_palette_update_noise();
-    }
-  } else if (visualization_type == 2) {
-    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-      for (uint16_t index = 0; index < led_count; index++) {
-        rgb_t rgb = water_palette_get_pixel_value(animation_cycle + index);
-        buffered_led_strip_set_pixel_value(&strips[strip],
-                                           index,
-                                           rgb.r,
-                                           rgb.g,
-                                           rgb.b,
-                                           visualization_brightness);
-      }
-    }
-  } else if (visualization_type == 3) {
-    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-      for (uint16_t index = 0; index < led_count; index++) {
-        rgb_t rgb = twinkle_buffer_get_pixel_value(index);
-        buffered_led_strip_set_pixel_value(&strips[strip],
-                                           index,
-                                           rgb.r,
-                                           rgb.g,
-                                           rgb.b,
-                                           visualization_brightness);
-      }
-    }
-    twinkle_buffer_tick();
-  } else if (visualization_type == 4) {
-    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-      for (uint16_t index = 0; index < led_count; index++) {
-        rgb_t rgb = twinkle_buffer_get_pixel_value(index + animation_cycle);
-        buffered_led_strip_set_pixel_value(&strips[strip],
-                                           index,
-                                           rgb.r,
-                                           rgb.g,
-                                           rgb.b,
-                                           visualization_brightness);
-      }
-    }
-    twinkle_buffer_tick();
-  } else if (visualization_type == 5) {
-    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-      for (uint16_t index = 0; index < led_count; index++) {
-        rgb_t rgb = alien_buffer_get_pixel_value(index);
-        buffered_led_strip_set_pixel_value(&strips[strip],
-                                           index,
-                                           rgb.r,
-                                           rgb.g,
-                                           rgb.b,
-                                           visualization_brightness);
-      }
-    }
-    alien_buffer_tick(animation_cycle);
-  } else if (visualization_type == 6) {
-    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-      for (uint16_t index = 0; index < led_count; index++) {
-        rgb_t rgb = prob_weight_buffer_get_pixel_value(index);
-        buffered_led_strip_set_pixel_value(&strips[strip],
-                                           index,
-                                           rgb.r,
-                                           rgb.g,
-                                           rgb.b,
-                                           visualization_brightness);
-      }
-    }
-    prob_weight_buffer_tick(animation_cycle);
-  } else if (visualization_type == 7) {
-    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-      for (uint16_t index = 0; index < led_count; index++) {
-        rgb_t rgb = color_lightning_get_pixel_value(index);
-        buffered_led_strip_set_pixel_value(&strips[strip],
-                                           index,
-                                           rgb.r,
-                                           rgb.g,
-                                           rgb.b,
-                                           visualization_brightness);
-      }
-    }
-    color_lightning_tick(animation_cycle);
-  }
 }
 
 static void buffered_led_strips_update_task(void *params) {
@@ -708,7 +624,10 @@ static void buffered_led_strips_update_task(void *params) {
   // while we memcpy them into the SPI DMA buffers, and we're
   // the only task running on CPU1. Just to be safe, however, we to
   // output a steady 60Hz output.
-  ESP_LOGI(TAG, "Targeting LED updates at ~%ldHz: %ldms update period", update_frequency, 1000/update_frequency);
+  ESP_LOGI(TAG,
+           "Targeting LED updates at ~%ldHz: %ldms update period",
+           update_frequency,
+           1000 / update_frequency);
   TickType_t last_wake_time;
   TickType_t delay_ticks = (1000 / update_frequency) / portTICK_PERIOD_MS;
   last_wake_time = xTaskGetTickCount();
