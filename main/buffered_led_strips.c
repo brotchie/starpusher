@@ -84,6 +84,9 @@ SemaphoreHandle_t strip_buffers_mutex;
 // from conflicting with LED updates.
 SemaphoreHandle_t spi_mutex;
 
+// Protects against two threads interacting with vizuals data structures.
+SemaphoreHandle_t viz_mutex;
+
 buffered_led_strip_t strips[LED_STRIP_COUNT];
 
 // If true, then output a rainbow chase pattern.
@@ -220,6 +223,8 @@ size_t buffered_led_strip_safe_copy_to_dma_buffer(buffered_led_strip_t *strip,
 }
 
 void buffered_led_strips_initialize(uint32_t clock_speed_hz) {
+  viz_mutex = xSemaphoreCreateMutex();
+
   fire_palette_initialize();
   water_palette_initialize();
 
@@ -571,51 +576,64 @@ void buffered_led_strips_set_vizualiations(bool state) {
 
 uint8_t visualization_brightness = 255;
 
-vizualization_t *vizualizations[11] = {0};
+vizualization_t *vizualizations[12] = {0};
 vizualization_t *viz = NULL;
 uint8_t viz_index = 0;
 uint32_t animation_cycle = 0;
 rgb_t pixels[PER_STRIP_LED_COUNT];
 
-void buffered_led_strips_update_vizualizations() {
-  if (vizualizations[0] == 0) {
-    vizualizations[0] = rainbow_vizualization();
-    vizualizations[1] = fire_vizualization();
-    vizualizations[2] = water_vizualization();
-    vizualizations[3] =
-        twinkle_vizualization((twinkle_config_t){.race = false});
-    vizualizations[4] = twinkle_vizualization((twinkle_config_t){.race = true});
-    vizualizations[5] = alien_vizualization();
-    vizualizations[6] = sinusoidal_vizualization();
-    vizualizations[7] = lightning_vizualization();
-    vizualizations[8] = police_vizualization();
-    vizualizations[9] = lasers_vizualization();
-    vizualizations[10] = perlin_vizualization();
-  }
-  led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
-  if (viz == NULL) {
-    viz = vizualizations[viz_index];
-    viz->initialize(viz, led_info);
-  }
-  if (animation_cycle % 300 == 0) {
+void buffered_led_strips_next_vizualization() {
+  if (xSemaphoreTake(viz_mutex, portMAX_DELAY) == pdTRUE) {
+    led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
     if (viz != NULL) {
       viz->deinitialize(viz);
     }
     viz_index++;
-    viz_index %= 11;
+    if (vizualizations[viz_index] == NULL) {
+      viz_index = 0;
+    }
     viz = vizualizations[viz_index];
     viz->initialize(viz, led_info);
+    xSemaphoreGive(viz_mutex);
   }
-  viz->tick(viz, animation_cycle);
-  viz->get_pixel_values(viz, pixels, PER_STRIP_LED_COUNT);
-  for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
-    for (uint16_t index = 0; index < PER_STRIP_LED_COUNT; index++) {
-      rgb_t rgb = pixels[index];
-      buffered_led_strips_set_pixel_value(
-          strip, index, rgb.r, rgb.g, rgb.b, visualization_brightness);
+}
+
+void buffered_led_strips_update_vizualizations() {
+  if (xSemaphoreTake(viz_mutex, portMAX_DELAY) == pdTRUE) {
+    if (vizualizations[0] == 0) {
+      vizualizations[0] = rainbow_vizualization();
+      vizualizations[1] = fire_vizualization();
+      vizualizations[2] = water_vizualization();
+      vizualizations[3] =
+          twinkle_vizualization((twinkle_config_t){.race = false});
+      vizualizations[4] =
+          twinkle_vizualization((twinkle_config_t){.race = true});
+      vizualizations[5] = alien_vizualization();
+      vizualizations[6] = sinusoidal_vizualization();
+      vizualizations[7] = lightning_vizualization();
+      vizualizations[8] = police_vizualization();
+      //vizualizations[9] = lasers_vizualization();
+      vizualizations[9] = perlin_vizualization();
+      vizualizations[10] = NULL;
     }
+    led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
+    if (viz == NULL) {
+      viz = vizualizations[viz_index];
+      viz->initialize(viz, led_info);
+    }
+    viz->tick(viz, animation_cycle);
+    viz->get_pixel_values(viz, pixels, PER_STRIP_LED_COUNT);
+    for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
+      for (uint16_t index = 0; index < PER_STRIP_LED_COUNT; index++) {
+        rgb_t rgb = pixels[index];
+        buffered_led_strips_set_pixel_value(
+            strip, index, rgb.r, rgb.g, rgb.b, visualization_brightness);
+      }
+    }
+    animation_cycle++;
+
+    xSemaphoreGive(viz_mutex);
   }
-  animation_cycle++;
 }
 
 static void buffered_led_strips_update_task(void *params) {

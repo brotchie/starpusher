@@ -1,21 +1,21 @@
-#include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <stdbool.h>
-#include <stdio.h>
 
 #include "color.h"
 #include "viz.h"
 
-#define IP_ADDRESS "10.1.1.100"
+//#define IP_ADDRESS "10.1.1.100"
+#define IP_ADDRESS "127.0.0.1"
 #define PORT 6868
 #define MAX_UDP_BUFFER_SIZE 1472
-#define LED_COUNT 128
+#define LED_COUNT 100
 
 const size_t message_size = 7;
 uint8_t udp_buffer[MAX_UDP_BUFFER_SIZE];
@@ -87,44 +87,45 @@ void set_pixel_value(
 uint16_t animation_cycle = 0;
 
 int main(int argc, char **argv) {
-    reset_buffer();
-    rgb_t pixels[LED_COUNT];
+  reset_buffer();
+  rgb_t pixels[LED_COUNT];
 
-    vizualization_t* vizualizations[] = {
-        //rainbow_vizualization(),
-        //fire_vizualization(),
-        //water_vizualization(),
-        //twinkle_vizualization((twinkle_config_t){.race = false}),
-        //twinkle_vizualization((twinkle_config_t){.race = true}),
-        //alien_vizualization(),
-        //sinusoidal_vizualization(),
-        //lightning_vizualization(),
-        //police_vizualization(),
-        //lasers_vizualization(),
-        perlin_vizualization(),
-    };
-    led_info_t led_info = {.led_count=LED_COUNT};
-    uint8_t viz_count = sizeof(vizualizations) / sizeof(vizualization_t*);
-    uint8_t viz_index = 0;
-    printf("Initialized %ld\n", viz_count);
+  vizualization_t *vizualizations[] = {
+      rainbow_vizualization(),
+      fire_vizualization(),
+      water_vizualization(),
+      twinkle_vizualization((twinkle_config_t){.race = false}),
+      twinkle_vizualization((twinkle_config_t){.race = true}),
+      alien_vizualization(),
+      sinusoidal_vizualization(),
+      lightning_vizualization(),
+      police_vizualization(),
+      lasers_vizualization(),
+      perlin_vizualization(),
+  };
+  led_info_t led_info = {.led_count = LED_COUNT};
+  uint8_t viz_count = sizeof(vizualizations) / sizeof(vizualization_t *);
+  uint8_t viz_index = 0;
+  printf("Initialized %ld\n", viz_count);
 
-    vizualization_t *viz = vizualizations[viz_index];
-    viz->initialize(viz, led_info);
-    while (true) {
-        viz->get_pixel_values(viz, pixels, LED_COUNT);
-        for (uint16_t index = 0; index < LED_COUNT; index++) {
-            set_pixel_value(0, index, pixels[index].r, pixels[index].g, pixels[index].b, 150);
-        }
-        viz->tick(viz, animation_cycle);
-        animation_cycle++;
-        flush_buffer();
-        if (animation_cycle % 300 == 0) {
-            viz_index++;
-            viz_index %= viz_count;
-            viz->deinitialize(viz);
-            viz = vizualizations[viz_index];
-            viz->initialize(viz, led_info);
-        }
-        usleep(16000);
+  vizualization_t *viz = vizualizations[viz_index];
+  viz->initialize(viz, led_info);
+  while (true) {
+    viz->get_pixel_values(viz, pixels, LED_COUNT);
+    for (uint16_t index = 0; index < LED_COUNT; index++) {
+      set_pixel_value(
+          0, index, pixels[index].r, pixels[index].g, pixels[index].b, 255);
     }
+    viz->tick(viz, animation_cycle);
+    animation_cycle++;
+    flush_buffer();
+    if (animation_cycle % 300 == 0) {
+      viz_index++;
+      viz_index %= viz_count;
+      viz->deinitialize(viz);
+      viz = vizualizations[viz_index];
+      viz->initialize(viz, led_info);
+    }
+    usleep(16000);
+  }
 }

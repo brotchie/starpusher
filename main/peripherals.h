@@ -15,4 +15,7 @@ void device_id_initialize();
 // Reads the device's id from the current DIP switch.
 uint8_t device_id_get();
 
+// Polls a button on device id bit 1 to switch vizualizations.
+void vizualization_button_initialize();
+
 #endif

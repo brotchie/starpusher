@@ -10,6 +10,8 @@ typedef struct {
 } lightning_vizualization_t;
 
 void lightning_initialize(lightning_vizualization_t *viz, led_info_t led_info) {
+  viz->ticks_since_last_trigger = 0;
+  viz->second_trigger_countdown = 0;
 }
 void lightning_deinitialize(lightning_vizualization_t *viz) {}
 

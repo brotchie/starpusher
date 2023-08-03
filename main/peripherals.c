@@ -1,4 +1,10 @@
-#include "driver/gpio.h"
+#include <driver/gpio.h>
+#include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/timers.h>
+#include "buffered_led_strips.h"
+
 
 #define DEVICE_ID_BIT1_GPIO GPIO_NUM_39
 #define DEVICE_ID_BIT2_GPIO GPIO_NUM_36
@@ -38,4 +44,37 @@ uint8_t device_id_get() {
          (!gpio_get_level(DEVICE_ID_BIT2_GPIO) << 1) |
          (!gpio_get_level(DEVICE_ID_BIT3_GPIO) << 2) |
          (!gpio_get_level(DEVICE_ID_BIT4_GPIO) << 3);
+}
+
+TaskHandle_t button_poll_task_handle;
+int lastButtonState = 0;
+int lastTriggeredButtonState = 0;
+
+static void button_poll_task(void *params) {
+  TickType_t last_wake_time;
+  TickType_t delay_ticks = (1000 / 20) / portTICK_PERIOD_MS;
+  last_wake_time = xTaskGetTickCount();
+  for (;;) {
+    vTaskDelayUntil(&last_wake_time, delay_ticks);
+    int buttonState = !gpio_get_level(DEVICE_ID_BIT1_GPIO);
+
+    if (buttonState == lastButtonState && buttonState != lastTriggeredButtonState) {
+      lastTriggeredButtonState = buttonState;
+      if (buttonState == 1) {
+        buffered_led_strips_next_vizualization();
+      }
+    }
+    lastButtonState = buttonState;
+  }
+}
+
+
+void vizualization_button_initialize() {
+  xTaskCreatePinnedToCore(button_poll_task,
+                          "button_poll_task",
+                          4096,
+                          NULL,
+                          4,
+                          &button_poll_task_handle,
+                          0);
 }

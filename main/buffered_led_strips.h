@@ -15,5 +15,6 @@ uint8_t buffered_led_strips_acquire_buffers_mutex();
 void buffered_led_strips_release_buffers_mutex();
 void buffered_led_strips_start_update_task();
 void buffered_led_strips_set_vizualiations(bool state);
+void buffered_led_strips_next_vizualization();
 
 #endif

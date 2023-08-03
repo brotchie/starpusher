@@ -1,7 +1,7 @@
 #include <inttypes.h>
 
-#include "common.h"
 #include "buffered_led_strips.h"
+#include "common.h"
 #include "networking.h"
 #include "peripherals.h"
 
@@ -50,6 +50,7 @@ void app_main(void) {
     buffered_led_strips_reset(255, 255, 255, 255);
   } else if (device_id == RAINBOW_CHASE_TEST_PATTERN_DEVICE_ID) {
     buffered_led_strips_set_vizualiations(1);
+    vizualization_button_initialize();
   } else {
     buffered_led_strips_reset(0, 0, 0, 0);
   }
@@ -68,5 +69,8 @@ void app_main(void) {
   //
   // All networking is configured to be pinned to CPU0 (ESP32
   // is dual core).
-  networking_initialize(device_id);
+  if (device_id != WHITE_TEST_PATTERN_DEVICE_ID &&
+      device_id != RAINBOW_CHASE_TEST_PATTERN_DEVICE_ID) {
+    networking_initialize(device_id);
+  }
 }
