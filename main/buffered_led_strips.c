@@ -13,6 +13,7 @@
 
 #include "buffered_led_strips.h"
 #include "color.h"
+#include "common.h"
 #include "vizualizations/viz.h"
 
 static const char *TAG = "buffered_led_strips";
@@ -41,7 +42,49 @@ static const char *TAG = "buffered_led_strips";
 // LED strips configuration.
 #define FRAME_SIZE 4
 #define LED_STRIP_COUNT 4
+
+#ifdef STARPUSHER_PORTABLE
+#ifdef STARPUSHER_TOTEM
+#define PER_STRIP_LED_COUNT 286
+led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT,
+                       .segments = {{.start_index = 0, .end_index = 197},
+                                    {.start_index = 198, .end_index = 242},
+                                    {.start_index = 243, .end_index = 287}}};
+typedef enum {
+  STAR_MODE_NONE,
+  STAR_MODE_YELLOW,
+  STAR_MODE_CYAN,
+  STAR_MODE_MARIO,
+  STAR_MODE_RED,
+  STAR_MODE_GREEN,
+  STAR_MODE_BLUE,
+} star_mode_t;
+
+typedef enum {
+  AUGMENTATION_NONE,
+  AUGMENTATION_SPARKLES_WHITE,
+} augmentation_t;
+
+star_mode_t star_mode = STAR_MODE_NONE;
+augmentation_t augmentation = AUGMENTATION_NONE;
+
+void buffered_led_strips_cycle_star_mode() {
+  star_mode++;
+  star_mode %= (STAR_MODE_BLUE + 1);
+}
+
+void buffered_led_strips_cycle_augmentation() {
+  augmentation++;
+  augmentation %= (AUGMENTATION_SPARKLES_WHITE + 1);
+}
+#else
+#define PER_STRIP_LED_COUNT 80
+led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
+#endif
+#else
 #define PER_STRIP_LED_COUNT 420
+led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
+#endif
 
 // 2Mhz is enough to get 60 FPS for 4x 420 LED strips.
 #define DEFAULT_APA102_CLOCK_SPEED_HZ 2000000
@@ -228,23 +271,31 @@ void buffered_led_strips_initialize(uint32_t clock_speed_hz) {
   fire_palette_initialize();
   water_palette_initialize();
 
+  led_device_type_t device_type;
+
+#ifdef STARPUSHER_PORTABLE
+  device_type = LED_DEVICE_WS2812B;
+#else
+  device_type = LED_DEVICE_APA102;
+#endif
+
   // LED0 port
-  strips[0].device_type = LED_DEVICE_APA102;
+  strips[0].device_type = device_type;
   strips[0].output_select = OUTPUT_SELECT_LED0_LED2;
   strips[0].led_count = PER_STRIP_LED_COUNT;
 
   // LED1 port
-  strips[1].device_type = LED_DEVICE_APA102;
+  strips[1].device_type = device_type;
   strips[1].output_select = OUTPUT_SELECT_LED1_LED3;
   strips[1].led_count = PER_STRIP_LED_COUNT;
 
   // LED2 port
-  strips[2].device_type = LED_DEVICE_APA102;
+  strips[2].device_type = device_type;
   strips[2].output_select = OUTPUT_SELECT_LED0_LED2;
   strips[2].led_count = PER_STRIP_LED_COUNT;
 
   // LED3 port
-  strips[3].device_type = LED_DEVICE_APA102;
+  strips[3].device_type = device_type;
   strips[3].output_select = OUTPUT_SELECT_LED1_LED3;
   strips[3].led_count = PER_STRIP_LED_COUNT;
 
@@ -546,8 +597,10 @@ void buffered_led_strips_update() {
   uint64_t start_micros = esp_timer_get_time();
   buffered_led_strips_update_for_output_select(
       OUTPUT_SELECT_LED0_LED2, &strips[0], &strips[2]);
+#ifndef STARPUSHER_PORTABLE
   buffered_led_strips_update_for_output_select(
       OUTPUT_SELECT_LED1_LED3, &strips[1], &strips[3]);
+#endif
   uint64_t end_micros = esp_timer_get_time();
   double duration_millis = (end_micros - start_micros) / 1000.0;
   if (update_ticks % 600 == 0) {
@@ -574,21 +627,92 @@ void buffered_led_strips_set_vizualiations(bool state) {
   vizualizations_state = state;
 }
 
-uint8_t visualization_brightness = 255;
+uint8_t visualization_brightness = 1;
+uint8_t post_vizualization_brightness_change_ticks = 0;
 
+uint32_t animation_cycle = 0;
+
+#ifdef STARPUSHER_TOTEM
+bool totem_beacon_mode = false;
+TickType_t last_beacon_tick = 0;
+
+void buffered_led_strips_toggle_totem_beacon_mode() {
+  totem_beacon_mode = !totem_beacon_mode;
+  if (totem_beacon_mode) {
+    visualization_brightness = 8;
+    last_beacon_tick = xTaskGetTickCount();
+    animation_cycle = 0;
+  }
+  if (!totem_beacon_mode) {
+    visualization_brightness = 3;
+    buffered_led_strips_next_vizualization();
+  }
+}
+
+#endif
+
+uint8_t max_viz_index;
 vizualization_t *vizualizations[12] = {0};
 vizualization_t *viz = NULL;
 uint8_t viz_index = 0;
-uint32_t animation_cycle = 0;
 rgb_t pixels[PER_STRIP_LED_COUNT];
+rgb_t brightness_change_indiciator_colors[8] = {
+    {.r = 0, .g = 0, .b = 0},
+    {.r = 255, .g = 255, .b = 255},
+
+    {.r = 255, .g = 0, .b = 255},
+    {.r = 255, .g = 255, .b = 0},
+    {.r = 0, .g = 255, .b = 255},
+
+    {.r = 255, .g = 0, .b = 0},
+    {.r = 0, .g = 255, .b = 0},
+    {.r = 0, .g = 0, .b = 255},
+};
+
+uint8_t brightness_to_actual_brightness_mapping[8] = {
+    16,
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    255,
+};
+
+void buffered_led_strips_set_vizualization(vizualization_t *new_viz) {
+  if (xSemaphoreTake(viz_mutex, portMAX_DELAY) == pdTRUE) {
+    led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
+
+    if (viz != NULL) {
+      viz->deinitialize(viz);
+    }
+    viz = new_viz;
+    viz->initialize(viz, led_info);
+    xSemaphoreGive(viz_mutex);
+  }
+}
 
 void buffered_led_strips_next_vizualization() {
+  viz_index++;
+  if (vizualizations[viz_index] == NULL) {
+    viz_index = 0;
+  }
+  buffered_led_strips_set_vizualization(vizualizations[viz_index]);
+  viz = vizualizations[viz_index];
+}
+
+void buffered_led_strips_previous_vizualization() {
   if (xSemaphoreTake(viz_mutex, portMAX_DELAY) == pdTRUE) {
     led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
     if (viz != NULL) {
       viz->deinitialize(viz);
     }
-    viz_index++;
+    if (viz_index == 0) {
+      viz_index = max_viz_index;
+    } else {
+      viz_index--;
+    }
     if (vizualizations[viz_index] == NULL) {
       viz_index = 0;
     }
@@ -599,6 +723,7 @@ void buffered_led_strips_next_vizualization() {
 }
 
 void buffered_led_strips_update_vizualizations() {
+  uint16_t sparkle_mod = 1 / 0.008;
   if (xSemaphoreTake(viz_mutex, portMAX_DELAY) == pdTRUE) {
     if (vizualizations[0] == 0) {
       vizualizations[0] = rainbow_vizualization();
@@ -612,11 +737,28 @@ void buffered_led_strips_update_vizualizations() {
       vizualizations[6] = sinusoidal_vizualization();
       vizualizations[7] = lightning_vizualization();
       vizualizations[8] = police_vizualization();
-      //vizualizations[9] = lasers_vizualization();
+      // vizualizations[9] = lasers_vizualization();
       vizualizations[9] = perlin_vizualization();
+#ifdef STARPUSHER_TOTEM
+      vizualizations[10] = starburst_vizualization();
+      vizualizations[11] = NULL;
+      max_viz_index = 10;
+#else
       vizualizations[10] = NULL;
+      max_viz_index = 9;
+#endif
     }
     led_info_t led_info = {.led_count = PER_STRIP_LED_COUNT};
+#ifdef STARPUSHER_TOTEM
+    if (totem_beacon_mode && viz_index != 10) {
+      viz_index = 10;
+      if (viz != NULL) {
+        viz->deinitialize(viz);
+      }
+      viz = vizualizations[viz_index];
+      viz->initialize(viz, led_info);
+    }
+#endif
     if (viz == NULL) {
       viz = vizualizations[viz_index];
       viz->initialize(viz, led_info);
@@ -626,14 +768,94 @@ void buffered_led_strips_update_vizualizations() {
     for (uint8_t strip = 0; strip < LED_STRIP_COUNT; strip++) {
       for (uint16_t index = 0; index < PER_STRIP_LED_COUNT; index++) {
         rgb_t rgb = pixels[index];
+        if (post_vizualization_brightness_change_ticks > 0) {
+          if (index % 3 == 0) {
+            rgb = brightness_change_indiciator_colors[visualization_brightness -
+                                                      1];
+          } else {
+            rgb.r = 0;
+            rgb.g = 0;
+            rgb.b = 0;
+          }
+        }
+        if (index >= 196 && !totem_beacon_mode) {
+          if (star_mode == STAR_MODE_YELLOW) {
+            rgb.r = 255;
+            rgb.g = 255;
+            rgb.b = 0;
+          } else if (star_mode == STAR_MODE_CYAN) {
+            rgb.r = 0;
+            rgb.g = 255;
+            rgb.b = 255;
+          } else if (star_mode == STAR_MODE_RED) {
+            rgb.r = 255;
+            rgb.g = 0;
+            rgb.b = 0;
+          } else if (star_mode == STAR_MODE_GREEN) {
+            rgb.r = 0;
+            rgb.g = 255;
+            rgb.b = 0;
+          } else if (star_mode == STAR_MODE_BLUE) {
+            rgb.r = 0;
+            rgb.g = 0;
+            rgb.b = 255;
+          } else if (star_mode == STAR_MODE_MARIO) {
+            uint8_t star_flash_cycle = (animation_cycle / 4) % 4;
+            if (star_flash_cycle == 0 || star_flash_cycle == 2) {
+              rgb.r = 0xf8;
+              rgb.g = 0xf8;
+              rgb.b = 0;
+            } else if (star_flash_cycle == 1) {
+              rgb.r = 0xf8;
+              rgb.g = 0xd8;
+              rgb.b = 0x70;
+            } else if (star_flash_cycle == 3) {
+              rgb.r = 0xf8;
+              rgb.g = 0x00;
+              rgb.b = 0x00;
+            }
+          }
+        }
+        if (augmentation == AUGMENTATION_SPARKLES_WHITE && !totem_beacon_mode) {
+          if (rand() % sparkle_mod == 0) {
+            rgb.r = 255;
+            rgb.g = 255;
+            rgb.b = 255;
+          }
+        }
         buffered_led_strips_set_pixel_value(
-            strip, index, rgb.r, rgb.g, rgb.b, visualization_brightness);
+            strip,
+            index,
+            rgb.r,
+            rgb.g,
+            rgb.b,
+            brightness_to_actual_brightness_mapping[visualization_brightness -
+                                                    1]);
       }
+    }
+    if (post_vizualization_brightness_change_ticks > 0) {
+      post_vizualization_brightness_change_ticks--;
     }
     animation_cycle++;
 
     xSemaphoreGive(viz_mutex);
   }
+}
+
+void buffered_led_strips_increase_vizualization_brightness() {
+  visualization_brightness++;
+  if (visualization_brightness > 8) {
+    visualization_brightness = 1;
+  }
+  post_vizualization_brightness_change_ticks = 30;
+}
+
+void buffered_led_strips_decrease_vizualization_brightness() {
+  visualization_brightness--;
+  if (visualization_brightness == 0) {
+    visualization_brightness = 8;
+  }
+  post_vizualization_brightness_change_ticks = 30;
 }
 
 static void buffered_led_strips_update_task(void *params) {
@@ -650,6 +872,7 @@ static void buffered_led_strips_update_task(void *params) {
   TickType_t delay_ticks = (1000 / update_frequency) / portTICK_PERIOD_MS;
   last_wake_time = xTaskGetTickCount();
   for (;;) {
+
     vTaskDelayUntil(&last_wake_time, delay_ticks);
 
     if (vizualizations_state) {
@@ -661,6 +884,13 @@ static void buffered_led_strips_update_task(void *params) {
     if (xSemaphoreTake(spi_mutex, portMAX_DELAY) == pdTRUE) {
       buffered_led_strips_update();
       xSemaphoreGive(spi_mutex);
+    }
+    if (totem_beacon_mode &&
+        (last_wake_time - last_beacon_tick) * portTICK_PERIOD_MS > 2000) {
+      TickType_t beacon_delay_ticks = 10 * 1000 / portTICK_PERIOD_MS;
+      last_beacon_tick = last_wake_time + beacon_delay_ticks;
+      vTaskDelayUntil(&last_wake_time, beacon_delay_ticks);
+      animation_cycle = 0;
     }
   }
 }

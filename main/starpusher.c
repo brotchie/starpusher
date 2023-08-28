@@ -46,6 +46,13 @@ void app_main(void) {
   device_id_initialize();
   uint8_t device_id = device_id_get();
 
+#ifdef STARPUSHER_PORTABLE
+  buffered_led_strips_reset(0, 0, 0, 0);
+#ifndef STARPUSHER_PORTABLE_NETWORKING
+  buffered_led_strips_set_vizualiations(1);
+#endif
+  vizualization_button_initialize();
+#else
   if (device_id == WHITE_TEST_PATTERN_DEVICE_ID) {
     buffered_led_strips_reset(255, 255, 255, 255);
   } else if (device_id == RAINBOW_CHASE_TEST_PATTERN_DEVICE_ID) {
@@ -54,6 +61,7 @@ void app_main(void) {
   } else {
     buffered_led_strips_reset(0, 0, 0, 0);
   }
+#endif
 
   // Kick-off the primary LED update task. This is effectively
   // a loop that clocks out pixel buffers to LED strips as
@@ -63,14 +71,16 @@ void app_main(void) {
   // on that core so it's can run without interruption.
   buffered_led_strips_start_update_task();
 
-  // Initialize networking, assigning a Static IP based on
-  // Device ID, listen for UDP packets, and multicast a discovery
-  // packet every second.
-  //
-  // All networking is configured to be pinned to CPU0 (ESP32
-  // is dual core).
+// Initialize networking, assigning a Static IP based on
+// Device ID, listen for UDP packets, and multicast a discovery
+// packet every second.
+//
+// All networking is configured to be pinned to CPU0 (ESP32
+// is dual core).
+#if !defined(STARPUSHER_PORTABLE) || defined(STARPUSHER_PORTABLE_NETWORKING)
   if (device_id != WHITE_TEST_PATTERN_DEVICE_ID &&
       device_id != RAINBOW_CHASE_TEST_PATTERN_DEVICE_ID) {
     networking_initialize(device_id);
   }
+#endif
 }

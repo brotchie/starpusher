@@ -5,7 +5,7 @@
 #include "buttons.h"
 
 #define DEBOUNCE_TIME_MS 20
-#define DOUBLE_PRESS_TIME_MS 50
+#define DOUBLE_PRESS_TIME_MS 200
 #define LONG_PRESS_TIME_MS 1000
 
 button_press_t
@@ -50,6 +50,8 @@ detect_button_press(bool is_pressed, button_t *button, uint32_t current_time) {
       button->state = BUTTON_IDLE;
       button->press_type = PRESS_SINGLE;
     }
+    break;
+  default:
     break;
   }
 

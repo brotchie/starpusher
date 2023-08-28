@@ -1,10 +1,13 @@
+#include "buffered_led_strips.h"
+#include "buttons.h"
+#include "common.h"
 #include <driver/gpio.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/timers.h>
-#include "buffered_led_strips.h"
 
+static const char *TAG = "peripherals";
 
 #define DEVICE_ID_BIT1_GPIO GPIO_NUM_39
 #define DEVICE_ID_BIT2_GPIO GPIO_NUM_36
@@ -47,8 +50,9 @@ uint8_t device_id_get() {
 }
 
 TaskHandle_t button_poll_task_handle;
-int lastButtonState = 0;
-int lastTriggeredButtonState = 0;
+
+button_t red_button;
+button_t green_button;
 
 static void button_poll_task(void *params) {
   TickType_t last_wake_time;
@@ -56,18 +60,40 @@ static void button_poll_task(void *params) {
   last_wake_time = xTaskGetTickCount();
   for (;;) {
     vTaskDelayUntil(&last_wake_time, delay_ticks);
-    int buttonState = !gpio_get_level(DEVICE_ID_BIT1_GPIO);
-
-    if (buttonState == lastButtonState && buttonState != lastTriggeredButtonState) {
-      lastTriggeredButtonState = buttonState;
-      if (buttonState == 1) {
-        buffered_led_strips_next_vizualization();
-      }
+    button_press_t red_press =
+        detect_button_press(!gpio_get_level(DEVICE_ID_BIT1_GPIO),
+                            &red_button,
+                            xTaskGetTickCount() * portTICK_PERIOD_MS);
+    button_press_t green_press =
+        detect_button_press(!gpio_get_level(DEVICE_ID_BIT2_GPIO),
+                            &green_button,
+                            xTaskGetTickCount() * portTICK_PERIOD_MS);
+    if (red_press == PRESS_SINGLE) {
+      buffered_led_strips_next_vizualization();
     }
-    lastButtonState = buttonState;
+    if (green_press == PRESS_SINGLE) {
+      buffered_led_strips_previous_vizualization();
+    }
+    if (red_press == PRESS_LONG) {
+      buffered_led_strips_increase_vizualization_brightness();
+    }
+    if (green_press == PRESS_LONG) {
+#ifdef STARPUSHER_TOTEM
+      buffered_led_strips_toggle_totem_beacon_mode();
+#else
+      buffered_led_strips_decrease_vizualization_brightness();
+#endif
+    }
+
+    if (green_press == PRESS_DOUBLE) {
+      buffered_led_strips_cycle_star_mode();
+    }
+
+    if (red_press == PRESS_DOUBLE) {
+      buffered_led_strips_cycle_augmentation();
+    }
   }
 }
-
 
 void vizualization_button_initialize() {
   xTaskCreatePinnedToCore(button_poll_task,

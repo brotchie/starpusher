@@ -13,10 +13,11 @@
 #include "color.h"
 #include "viz.h"
 
-#define IP_ADDRESS "127.0.0.1"
+//#define IP_ADDRESS "127.0.0.1"
+#define IP_ADDRESS "10.1.1.100"
 #define PORT 6868
 #define MAX_UDP_BUFFER_SIZE 1472
-#define LED_COUNT 100
+#define LED_COUNT 288
 #define MAX_VIZUALIZATIONS 20
 #define VIZUALIZATION_PREVIEW_SIZE 20
 
@@ -318,24 +319,25 @@ int main(int argc, char *argv[]) {
       .state = {
           .mode = APP_MODE_NORMAL,
           .config_var = CONFIG_VAR_GLOBAL_BRIGHTNESS,
-          .global_brightness = 7,
+          .global_brightness = 3,
       }};
 
-  add_vizualization(&config_viz.state, rainbow_vizualization(), false);
-  add_vizualization(&config_viz.state, fire_vizualization(), true);
-  add_vizualization(&config_viz.state, water_vizualization(), true);
-  add_vizualization(&config_viz.state,
-                    twinkle_vizualization((twinkle_config_t){.race = false}),
-                    true);
-  add_vizualization(&config_viz.state,
-                    twinkle_vizualization((twinkle_config_t){.race = true}),
-                    true);
-  add_vizualization(&config_viz.state, alien_vizualization(), true);
-  add_vizualization(&config_viz.state, sinusoidal_vizualization(), true);
-  add_vizualization(&config_viz.state, lightning_vizualization(), false);
-  add_vizualization(&config_viz.state, police_vizualization(), true);
-  add_vizualization(&config_viz.state, lasers_vizualization(), true);
-  add_vizualization(&config_viz.state, perlin_vizualization(), true);
+  add_vizualization(&config_viz.state, starburst_vizualization(), false);
+  // add_vizualization(&config_viz.state, rainbow_vizualization(), false);
+  // add_vizualization(&config_viz.state, fire_vizualization(), true);
+  // add_vizualization(&config_viz.state, water_vizualization(), true);
+  // add_vizualization(&config_viz.state,
+  //                  twinkle_vizualization((twinkle_config_t){.race = false}),
+  //                  true);
+  // add_vizualization(&config_viz.state,
+  //                  twinkle_vizualization((twinkle_config_t){.race = true}),
+  //                  true);
+  // add_vizualization(&config_viz.state, alien_vizualization(), true);
+  // add_vizualization(&config_viz.state, sinusoidal_vizualization(), true);
+  // add_vizualization(&config_viz.state, lightning_vizualization(), false);
+  // add_vizualization(&config_viz.state, police_vizualization(), true);
+  // add_vizualization(&config_viz.state, lasers_vizualization(), true);
+  // add_vizualization(&config_viz.state, perlin_vizualization(), true);
 
   next_vizualization();
 

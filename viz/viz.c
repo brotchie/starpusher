@@ -13,11 +13,11 @@
 #include "color.h"
 #include "viz.h"
 
-// #define IP_ADDRESS "10.1.1.100"
-#define IP_ADDRESS "127.0.0.1"
+#define IP_ADDRESS "10.1.1.100"
+//#define IP_ADDRESS "127.0.0.1"
 #define PORT 6868
 #define MAX_UDP_BUFFER_SIZE 1472
-#define LED_COUNT 100
+#define LED_COUNT 288
 #define MAX_VIZUALIZATIONS 50
 
 const size_t message_size = 7;
