@@ -2,9 +2,40 @@
 
 #include "buffered_led_strips.h"
 #include "common.h"
+#include "led_strips.h"
 #include "networking.h"
 #include "peripherals.h"
 
+#include <driver/gpio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/timers.h>
+
+void app_main(void) {
+  led_strips_initialize();
+  led_strips_start_update_task();
+
+  esp_err_t ret = gpio_set_direction(GPIO_NUM_17, GPIO_MODE_OUTPUT);
+  ESP_ERROR_CHECK(ret);
+
+  // const TickType_t xDelay = 500 / portTICK_PERIOD_MS;
+
+  // while (1) {
+  //  uint32_t data = 0x00050000;
+  //  for (uint8_t i = 0; i < 24; i++) {
+  //    if (data & 0x80000000) {
+  //      gpio_set_level(GPIO_NUM_17, 1);
+  //      gpio_set_level(GPIO_NUM_17, 1);
+  //      gpio_set_level(GPIO_NUM_17, 0);
+  //    } else {
+  //      gpio_set_level(GPIO_NUM_17, 1);
+  //      gpio_set_level(GPIO_NUM_17, 0);
+  //      gpio_set_level(GPIO_NUM_17, 0);
+  //    }
+  //    data <<= 1;
+  //  }
+  //  vTaskDelay(xDelay);
+  //}
+}
 // Main entrypoint for Starpushers.
 //
 // Quick guide of codebase:
@@ -34,7 +65,7 @@
 //    group and port. Discovery packets are constructed and sent in
 //    udp_discovery_callback().
 //
-void app_main(void) {
+void old_app_main(void) {
   // Blue indicator LED stays on while Starpusher is receiving
   // UDP packets
   indicator_led_initialize();
