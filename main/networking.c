@@ -11,11 +11,11 @@
 #include <lwip/netdb.h>
 #include <lwip/sockets.h>
 #include <lwip/sys.h>
+#include <stdbool.h>
 
 #include "common.h"
-#include "buffered_led_strips.h"
+#include "indicator_led.h"
 #include "networking.h"
-#include "peripherals.h"
 #include "udp_protocol.h"
 
 static const char *TAG = "networking";
@@ -33,18 +33,24 @@ static const char *TAG = "networking";
 
 #define WATCHDOG_INTERVAL_MILLIS 5000
 
-TimerHandle_t udp_watchdog_timer;
-TimerHandle_t udp_discovery_timer;
+static rgb_t watchdog_tripped_led_color = {.r = 128, .g = 0, .b = 0};
+static rgb_t networking_ok_led_color = {.r = 0, .g = 128, .b = 128};
+static rgb_t udp_ok_led_color = {.r = 0, .g = 128, .b = 0};
+static rgb_t networking_down_led_color = {.r = 128, .g = 0, .b = 128};
 
-uint8_t device_id;
+static TimerHandle_t udp_watchdog_timer;
+static TimerHandle_t udp_discovery_timer;
+
+static uint8_t device_id;
+
+static bool first_udp_packet_received = false;
 
 void create_static_ip_from_device_id(uint8_t device_id,
                                      char *buffer,
                                      size_t size) {
-  snprintf(buffer, size, "10.1.1.%d", device_id + 100);
+  snprintf(buffer, size, "10.1.1.%d", device_id);
 }
 
-/** Event handler for Ethernet events */
 static void eth_event_handler(void *arg,
                               esp_event_base_t event_base,
                               int32_t event_id,
@@ -65,9 +71,11 @@ static void eth_event_handler(void *arg,
              mac_addr[3],
              mac_addr[4],
              mac_addr[5]);
+    indicator_led_set(networking_ok_led_color);
     break;
   case ETHERNET_EVENT_DISCONNECTED:
     ESP_LOGI(TAG, "Ethernet Link: DOWN");
+    indicator_led_set(networking_down_led_color);
     break;
   case ETHERNET_EVENT_START:
     ESP_LOGI(TAG, "Ethernet: STARTED");
@@ -114,17 +122,8 @@ static void set_static_ip(esp_netif_t *netif, char *ip_address) {
 
 static void udp_watchdog_callback(TimerHandle_t xTimer) {
   ESP_LOGE(TAG, "UDP watchdog tripped");
-  indicator_led_set(0);
-  // If we haven't received UDP packets in a while, then turn off
-  // all of the LEDs.
-  if (buffered_led_strips_acquire_buffers_mutex()) {
-    if (device_id == WHITE_TEST_PATTERN_DEVICE_ID) {
-      // Device ID 15 UDP watchdog sets all colors to white.
-      buffered_led_strips_reset(255, 255, 255, 255);
-    } else {
-      buffered_led_strips_reset(0, 0, 0, 0);
-    }
-    buffered_led_strips_release_buffers_mutex();
+  if (first_udp_packet_received) {
+    indicator_led_set(watchdog_tripped_led_color);
   }
 }
 
@@ -133,7 +132,7 @@ static void udp_discovery_callback(TimerHandle_t xTimer) {
   int sock = -1;
   int err = 0;
 
-  char message[7] = {'S', 'P', device_id, 10, 1, 1, 100 + device_id};
+  char message[7] = {'*', 'D', device_id, 10, 1, 1, device_id};
 
   sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
   if (sock < 0) {
@@ -192,12 +191,16 @@ static void udp_server_task(void *pvParameters) {
         ESP_LOGE(TAG, "recvfrom failed: errno %d", errno);
         break;
       } else {
+        if (!first_udp_packet_received) {
+          first_udp_packet_received = true;
+          indicator_led_set(udp_ok_led_color);
+        }
         if (!xTimerIsTimerActive(udp_watchdog_timer)) {
           ESP_LOGI(TAG, "UDP watchdog reset");
+          indicator_led_set(udp_ok_led_color);
         }
         xTimerReset(udp_watchdog_timer, 0);
 
-        indicator_led_set(1);
         process_udp_packet(rx_buffer, size);
       }
     }
@@ -218,7 +221,16 @@ void networking_initialize(uint8_t init_device_id) {
       device_id, static_ip_address, sizeof(static_ip_address));
 
   eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+  // Make sure we pin the MAC management to CPU core 0 so it doesn't contend
+  // with SPI handling on core 1.
+  mac_config.flags = ETH_MAC_FLAG_PIN_TO_CORE;
   eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+  // This is a REALLY important setting. If the EMAC burst length is greater
+  // than 2 then there's contention with the SPI DMA controller and SPI data is
+  // corrupted! Before lowering the DMA burst length, connected pixels strips
+  // would visually glitch out when hammering the Starpusher with lots of UDP
+  // packets.
+  esp32_emac_config.dma_burst_len = ETH_DMA_BURST_LEN_2;
   esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
 
   eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
@@ -265,5 +277,6 @@ void networking_initialize(uint8_t init_device_id) {
                    udp_discovery_callback);
   xTimerStart(udp_discovery_timer, 0);
 
-  xTaskCreate(udp_server_task, "udp_server", 4096, NULL, 5, NULL);
+  xTaskCreatePinnedToCore(
+      udp_server_task, "udp_server", 4096, NULL, 5, NULL, 0);
 }

@@ -3,11 +3,12 @@
 
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
-#include <esp_attr.h>
 #include <esp_heap_caps.h>
+#include <esp_intr_alloc.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <freertos/timers.h>
 
@@ -16,140 +17,127 @@
 
 static const char *TAG = "led_strips";
 
-#define SR_SPI_TRANSACTION_COUNT 16
+//#define BUILT_IN_ANIMATIONS
+//#define PRINT_TIMING_DEBUG
+
 #define PORT_COUNT 8
-#define LEDS_PER_PORT 55
+
+// 3 triangles with 55 LEDs on each side.
+#define LEDS_PER_PORT 9 * 55
+
+#define SPI_MAX_TRANSFER_SIZE 71282
+
+// Drive SPI clock at 11Mhz. At 13Mhz is starts to glitch
+// out a LED strip of length 495. At 10MHz is doesn't fit
+// in the 13.3ms time bound for 60FPS.
+#define SR_SRCLK_FREQUENCY SPI_MASTER_FREQ_11M
 
 #define SR_SRCLK_GPIO GPIO_NUM_4
 
-#define SR_DATA_GPIO GPIO_NUM_15
+#define SR_SER0_GPIO GPIO_NUM_14
+#define SR_SER1_GPIO GPIO_NUM_15
 #define SR_RCLK_GPIO GPIO_NUM_2
+// Unfortunately the SPI driver won't work in QUAD mode
+// without mapping the data3 pin through GPIO (maybe
+// there's a way around this?). We simply map the 4th
+// SPI line to the CFG pin on the WT32-ETH0, which I
+// don't think is used for anything.
+#define SR_ZERO_GPIO GPIO_NUM_32
 
 #define SR_SPI_HOST SPI2_HOST
 
-rgb_t pixel_buffer[LEDS_PER_PORT][PORT_COUNT];
+static rgb_t pixel_buffer[PORT_COUNT][LEDS_PER_PORT];
+static SemaphoreHandle_t pixel_buffer_mutex;
 
-spi_device_handle_t spi;
-uint8_t *dma_buffer = NULL;
-size_t dma_buffer_size;
+static spi_device_handle_t spi;
+static uint8_t *dma_buffer = NULL;
+static size_t dma_buffer_size;
 
-TaskHandle_t led_update_task_handle;
+static TaskHandle_t led_update_task_handle;
 
-// Update LED strips at 60 FPS.
-const TickType_t led_update_frequency = 60;
+static TickType_t led_update_frequency = 60;
 
-/*
+static uint32_t led_strips_animation_cycle = 0;
 
-Use in the future if need to accurately log gap between
-SPI transactions.
-
-typedef struct {
-  uint64_t tx_start;
-  uint64_t tx_end;
-} tx_stats_t;
-
-static tx_stats_t tx_stat1;
-static tx_stats_t tx_stat2;
-static uint8_t tx_stats_index = 0;
-
-static void IRAM_ATTR tx_start_cb(spi_transaction_t *tx) {
-  if (tx_stats_index == 0) {
-    tx_stat1.tx_start = esp_timer_get_time();
-  } else {
-    tx_stat2.tx_start = esp_timer_get_time();
-  }
-}
-
-static void IRAM_ATTR tx_end_cb(spi_transaction_t *tx) {
-  if (tx_stats_index == 0) {
-    tx_stat1.tx_end = esp_timer_get_time();
-  } else {
-    tx_stat2.tx_end = esp_timer_get_time();
-  }
-  tx_stats_index = (tx_stats_index + 1) % 2;
-}*/
+static uint64_t total_time_spent = 0;
 
 void led_strips_spi_bus_initialize() {
   esp_err_t ret;
   spi_bus_config_t buscfg = {
-      .mosi_io_num = SR_RCLK_GPIO,
-      .miso_io_num = SR_DATA_GPIO,
+      .data0_io_num = SR_RCLK_GPIO,
+      .data1_io_num = SR_SER0_GPIO,
+      .data2_io_num = SR_SER1_GPIO,
+      .data3_io_num = SR_ZERO_GPIO,
       .sclk_io_num = SR_SRCLK_GPIO,
-      .flags = SPICOMMON_BUSFLAG_DUAL | SPICOMMON_BUSFLAG_MASTER,
-      // TODO: Calculate max transfer size from parameters.
-      .max_transfer_sz = 8192,
+      .flags = SPICOMMON_BUSFLAG_QUAD | SPICOMMON_BUSFLAG_MASTER,
+      .max_transfer_sz = SPI_MAX_TRANSFER_SIZE,
+      // Pin all SPI ISR handling on CPU core 1.
+      .isr_cpu_id = INTR_CPU_ID_1,
   };
   ret = spi_bus_initialize(SR_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
   ESP_ERROR_CHECK(ret);
 
   spi_device_interface_config_t devcfg = {
-      .clock_speed_hz = SPI_MASTER_FREQ_20M,
+      .clock_speed_hz = SR_SRCLK_FREQUENCY,
       .spics_io_num = -1,
-      .queue_size = SR_SPI_TRANSACTION_COUNT,
+      .queue_size = 1,
+      // Don't need to receive SPI.
       .flags = SPI_DEVICE_HALFDUPLEX,
-      /*.pre_cb = tx_start_cb,
-      .post_cb = tx_end_cb,*/
   };
   ret = spi_bus_add_device(SR_SPI_HOST, &devcfg, &spi);
   ESP_ERROR_CHECK(ret);
-
-  size_t max_spi_bytes;
-  spi_bus_get_max_transaction_len(SR_SPI_HOST, &max_spi_bytes);
-  ESP_LOGI(TAG, "Max SPI transaction length %d bytes", max_spi_bytes);
 }
 
-uint32_t led_strips_animation_cycle = 0;
-
 void led_strips_animation_tick() {
-  led_strips_animation_cycle++;
   for (uint16_t index = 0; index < LEDS_PER_PORT; index++) {
     rgb_t color = hsv_to_rgb(
         ((index + led_strips_animation_cycle) % 255) / 255.0f, 1.0, 1.0);
-    if (index != 0 && index != 54) {
-      color.r = 0;
-      color.g = 0;
-      color.b = 0;
-    }
     for (uint8_t port = 0; port < PORT_COUNT; port++) {
-      pixel_buffer[index][port] = color;
+      pixel_buffer[port][index] = color;
     }
   }
 }
 
-static const uint16_t morton_table_little_endian[256] = {
-    0x0040, 0x0240, 0x0840, 0x0a40, 0x2040, 0x2240, 0x2840, 0x2a40, 0x8040,
-    0x8240, 0x8840, 0x8a40, 0xa040, 0xa240, 0xa840, 0xaa40, 0x0042, 0x0242,
-    0x0842, 0x0a42, 0x2042, 0x2242, 0x2842, 0x2a42, 0x8042, 0x8242, 0x8842,
-    0x8a42, 0xa042, 0xa242, 0xa842, 0xaa42, 0x0048, 0x0248, 0x0848, 0x0a48,
-    0x2048, 0x2248, 0x2848, 0x2a48, 0x8048, 0x8248, 0x8848, 0x8a48, 0xa048,
-    0xa248, 0xa848, 0xaa48, 0x004a, 0x024a, 0x084a, 0x0a4a, 0x204a, 0x224a,
-    0x284a, 0x2a4a, 0x804a, 0x824a, 0x884a, 0x8a4a, 0xa04a, 0xa24a, 0xa84a,
-    0xaa4a, 0x0060, 0x0260, 0x0860, 0x0a60, 0x2060, 0x2260, 0x2860, 0x2a60,
-    0x8060, 0x8260, 0x8860, 0x8a60, 0xa060, 0xa260, 0xa860, 0xaa60, 0x0062,
-    0x0262, 0x0862, 0x0a62, 0x2062, 0x2262, 0x2862, 0x2a62, 0x8062, 0x8262,
-    0x8862, 0x8a62, 0xa062, 0xa262, 0xa862, 0xaa62, 0x0068, 0x0268, 0x0868,
-    0x0a68, 0x2068, 0x2268, 0x2868, 0x2a68, 0x8068, 0x8268, 0x8868, 0x8a68,
-    0xa068, 0xa268, 0xa868, 0xaa68, 0x006a, 0x026a, 0x086a, 0x0a6a, 0x206a,
-    0x226a, 0x286a, 0x2a6a, 0x806a, 0x826a, 0x886a, 0x8a6a, 0xa06a, 0xa26a,
-    0xa86a, 0xaa6a, 0x00c0, 0x02c0, 0x08c0, 0x0ac0, 0x20c0, 0x22c0, 0x28c0,
-    0x2ac0, 0x80c0, 0x82c0, 0x88c0, 0x8ac0, 0xa0c0, 0xa2c0, 0xa8c0, 0xaac0,
-    0x00c2, 0x02c2, 0x08c2, 0x0ac2, 0x20c2, 0x22c2, 0x28c2, 0x2ac2, 0x80c2,
-    0x82c2, 0x88c2, 0x8ac2, 0xa0c2, 0xa2c2, 0xa8c2, 0xaac2, 0x00c8, 0x02c8,
-    0x08c8, 0x0ac8, 0x20c8, 0x22c8, 0x28c8, 0x2ac8, 0x80c8, 0x82c8, 0x88c8,
-    0x8ac8, 0xa0c8, 0xa2c8, 0xa8c8, 0xaac8, 0x00ca, 0x02ca, 0x08ca, 0x0aca,
-    0x20ca, 0x22ca, 0x28ca, 0x2aca, 0x80ca, 0x82ca, 0x88ca, 0x8aca, 0xa0ca,
-    0xa2ca, 0xa8ca, 0xaaca, 0x00e0, 0x02e0, 0x08e0, 0x0ae0, 0x20e0, 0x22e0,
-    0x28e0, 0x2ae0, 0x80e0, 0x82e0, 0x88e0, 0x8ae0, 0xa0e0, 0xa2e0, 0xa8e0,
-    0xaae0, 0x00e2, 0x02e2, 0x08e2, 0x0ae2, 0x20e2, 0x22e2, 0x28e2, 0x2ae2,
-    0x80e2, 0x82e2, 0x88e2, 0x8ae2, 0xa0e2, 0xa2e2, 0xa8e2, 0xaae2, 0x00e8,
-    0x02e8, 0x08e8, 0x0ae8, 0x20e8, 0x22e8, 0x28e8, 0x2ae8, 0x80e8, 0x82e8,
-    0x88e8, 0x8ae8, 0xa0e8, 0xa2e8, 0xa8e8, 0xaae8, 0x00ea, 0x02ea, 0x08ea,
-    0x0aea, 0x20ea, 0x22ea, 0x28ea, 0x2aea, 0x80ea, 0x82ea, 0x88ea, 0x8aea,
-    0xa0ea, 0xa2ea, 0xa8ea, 0xaaea};
+// Here we've calculated pre-calculated the interleaving of all possible bytes
+// into the packed format for quad-SPI DMA. This trades off memory (512 bytes)
+// for a bunch of shift and masking operations.
+static const uint16_t interleave_table_little_endian[256] = {
+    0x0010, 0x0410, 0x4010, 0x4410, 0x0014, 0x0414, 0x4014, 0x4414, 0x0050,
+    0x0450, 0x4050, 0x4450, 0x0054, 0x0454, 0x4054, 0x4454, 0x0210, 0x0610,
+    0x4210, 0x4610, 0x0214, 0x0614, 0x4214, 0x4614, 0x0250, 0x0650, 0x4250,
+    0x4650, 0x0254, 0x0654, 0x4254, 0x4654, 0x2010, 0x2410, 0x6010, 0x6410,
+    0x2014, 0x2414, 0x6014, 0x6414, 0x2050, 0x2450, 0x6050, 0x6450, 0x2054,
+    0x2454, 0x6054, 0x6454, 0x2210, 0x2610, 0x6210, 0x6610, 0x2214, 0x2614,
+    0x6214, 0x6614, 0x2250, 0x2650, 0x6250, 0x6650, 0x2254, 0x2654, 0x6254,
+    0x6654, 0x0012, 0x0412, 0x4012, 0x4412, 0x0016, 0x0416, 0x4016, 0x4416,
+    0x0052, 0x0452, 0x4052, 0x4452, 0x0056, 0x0456, 0x4056, 0x4456, 0x0212,
+    0x0612, 0x4212, 0x4612, 0x0216, 0x0616, 0x4216, 0x4616, 0x0252, 0x0652,
+    0x4252, 0x4652, 0x0256, 0x0656, 0x4256, 0x4656, 0x2012, 0x2412, 0x6012,
+    0x6412, 0x2016, 0x2416, 0x6016, 0x6416, 0x2052, 0x2452, 0x6052, 0x6452,
+    0x2056, 0x2456, 0x6056, 0x6456, 0x2212, 0x2612, 0x6212, 0x6612, 0x2216,
+    0x2616, 0x6216, 0x6616, 0x2252, 0x2652, 0x6252, 0x6652, 0x2256, 0x2656,
+    0x6256, 0x6656, 0x0030, 0x0430, 0x4030, 0x4430, 0x0034, 0x0434, 0x4034,
+    0x4434, 0x0070, 0x0470, 0x4070, 0x4470, 0x0074, 0x0474, 0x4074, 0x4474,
+    0x0230, 0x0630, 0x4230, 0x4630, 0x0234, 0x0634, 0x4234, 0x4634, 0x0270,
+    0x0670, 0x4270, 0x4670, 0x0274, 0x0674, 0x4274, 0x4674, 0x2030, 0x2430,
+    0x6030, 0x6430, 0x2034, 0x2434, 0x6034, 0x6434, 0x2070, 0x2470, 0x6070,
+    0x6470, 0x2074, 0x2474, 0x6074, 0x6474, 0x2230, 0x2630, 0x6230, 0x6630,
+    0x2234, 0x2634, 0x6234, 0x6634, 0x2270, 0x2670, 0x6270, 0x6670, 0x2274,
+    0x2674, 0x6274, 0x6674, 0x0032, 0x0432, 0x4032, 0x4432, 0x0036, 0x0436,
+    0x4036, 0x4436, 0x0072, 0x0472, 0x4072, 0x4472, 0x0076, 0x0476, 0x4076,
+    0x4476, 0x0232, 0x0632, 0x4232, 0x4632, 0x0236, 0x0636, 0x4236, 0x4636,
+    0x0272, 0x0672, 0x4272, 0x4672, 0x0276, 0x0676, 0x4276, 0x4676, 0x2032,
+    0x2432, 0x6032, 0x6432, 0x2036, 0x2436, 0x6036, 0x6436, 0x2072, 0x2472,
+    0x6072, 0x6472, 0x2076, 0x2476, 0x6076, 0x6476, 0x2232, 0x2632, 0x6232,
+    0x6632, 0x2236, 0x2636, 0x6236, 0x6636, 0x2272, 0x2672, 0x6272, 0x6672,
+    0x2276, 0x2676, 0x6276, 0x6676};
 
-#define INTERLEAVE(q, out) *(uint16_t *)(out) = morton_table_little_endian[q];
+#define INTERLEAVE(q, out)                                                     \
+  *(uint16_t *)(out) = interleave_table_little_endian[q];
 
 void init_dma_buffer(uint8_t *out, size_t count) {
+  // Only the middle bit of each physical bit on the wire changes. The
+  // first and last bit are always 1 and 0 respectively.
   for (size_t i = 0; i < 3 * count; i++) {
     INTERLEAVE(0xff, out);
     out += 2;
@@ -161,10 +149,16 @@ void init_dma_buffer(uint8_t *out, size_t count) {
 }
 
 void led_strips_initialize() {
+  pixel_buffer_mutex = xSemaphoreCreateMutex();
   led_strips_spi_bus_initialize();
-  // Set all colors to black.
-  memset(pixel_buffer, 0, sizeof(rgb_t) * LEDS_PER_PORT * PORT_COUNT);
+  // Initially set all colors to black.
+  if (xSemaphoreTake(pixel_buffer_mutex, portMAX_DELAY) == pdTRUE) {
+    memset(pixel_buffer, 0, sizeof(rgb_t) * LEDS_PER_PORT * PORT_COUNT);
+    xSemaphoreGive(pixel_buffer_mutex);
+  }
+#ifdef LED_STRIP_ANIMATION
   led_strips_animation_tick();
+#endif
   // Allocate DMA buffer.
   // Multiply by 2 for 2bit wide data line on SPI bus,
   // Multiply by 3 because 24bit color per LED,
@@ -183,14 +177,19 @@ void led_strips_initialize() {
 }
 
 // Unpacks the colors channel f (r, g, b) of 8 ports into two unsigned 32bit
-// integers in little endian byte ordering: p3:p2:p1:p0, p4:p5:p6:p7.
+// integers in little endian byte ordering: p7:p6:p4:p4, p3:p2:p1:p0, this
+// ensures that the bits are in the correct positions so that output signals
+// align with Ports 1-8.
+//
+// This is much faster (twice as fast) as unpacking into a 8 x uint8_t array. We
+// then do operations directly on 2 x 32bit values rather than 8 x 8bit values.
 #define UNPACK_PORTS_TO_DUAL_UINT32(f)                                         \
-  const uint32_t u##f = pixel_buffer[i][3].f << 24 |                           \
-                        pixel_buffer[i][2].f << 16 |                           \
-                        pixel_buffer[i][1].f << 8 | pixel_buffer[i][0].f;      \
-  const uint32_t l##f = pixel_buffer[i][4].f << 24 |                           \
-                        pixel_buffer[i][5].f << 16 |                           \
-                        pixel_buffer[i][6].f << 8 | pixel_buffer[i][7].f;
+  const uint32_t u##f = pixel_buffer[7][i].f << 24 |                           \
+                        pixel_buffer[6][i].f << 16 |                           \
+                        pixel_buffer[5][i].f << 8 | pixel_buffer[4][i].f;      \
+  const uint32_t l##f = pixel_buffer[3][i].f << 24 |                           \
+                        pixel_buffer[2][i].f << 16 |                           \
+                        pixel_buffer[1][i].f << 8 | pixel_buffer[0][i].f;
 
 #define CALCULATE_BYTE(f, b, out)                                              \
   const uint32_t u##f##_##b = u##f & (0x80808080 >> b);                        \
@@ -213,95 +212,85 @@ void led_strips_initialize() {
   CALCULATE_BYTE(f, 6, out);                                                   \
   CALCULATE_BYTE(f, 7, out);
 
-uint64_t total_time_spent = 0;
 void led_strips_update() {
-
   uint64_t start = esp_timer_get_time();
-
-  size_t tx_size = dma_buffer_size / SR_SPI_TRANSACTION_COUNT;
-
-  uint8_t tx_count = 0;
   uint8_t *out = dma_buffer;
-  uint8_t *tx_start = dma_buffer;
 
-  esp_err_t ret;
-  spi_transaction_t txns[SR_SPI_TRANSACTION_COUNT];
+  if (xSemaphoreTake(pixel_buffer_mutex, portMAX_DELAY) == pdTRUE) {
+    for (uint16_t i = 0; i < LEDS_PER_PORT; i++) {
+      // The follow is a series of macros that expand out into a large
+      // "unrolled" loop that converts from color bytes to the SPI / LED
+      // wire format as required for driving a 74HC595 shift register.
+      //
+      // SKC6809MINI-HV-4P take color in RGB order (different from WS2812B).
+      UNPACK_PORTS_TO_DUAL_UINT32(r);
+      INTERLEAVE_AND_OUTPUT_WIRE_FORMAT(r, out);
+      UNPACK_PORTS_TO_DUAL_UINT32(g);
+      INTERLEAVE_AND_OUTPUT_WIRE_FORMAT(g, out + 6 * 8);
+      UNPACK_PORTS_TO_DUAL_UINT32(b);
+      INTERLEAVE_AND_OUTPUT_WIRE_FORMAT(b, out + 2 * 6 * 8);
 
-  for (uint16_t i = 0; i < LEDS_PER_PORT; i++) {
-    // The follow is a series of macros that expand out into a large
-    // "unrolled" loop that converts from color bytes to the SPI / LED
-    // wire format as required for driving a 74HC595 shift register.
-    //
-    // Would love to be able to optimize this more
-    UNPACK_PORTS_TO_DUAL_UINT32(r);
-    INTERLEAVE_AND_OUTPUT_WIRE_FORMAT(r, out);
-    UNPACK_PORTS_TO_DUAL_UINT32(g);
-    INTERLEAVE_AND_OUTPUT_WIRE_FORMAT(g, out + 6 * 8);
-    UNPACK_PORTS_TO_DUAL_UINT32(b);
-    INTERLEAVE_AND_OUTPUT_WIRE_FORMAT(b, out + 2 * 6 * 8);
-
-    out += 3 * 6 * 8;
-
-    if (out - tx_start >= tx_size && tx_count != SR_SPI_TRANSACTION_COUNT - 1) {
-      spi_transaction_t *tx = &txns[tx_count];
-      memset(tx, 0, sizeof(spi_transaction_t));
-      tx->length = 8 * (out - tx_start);
-      tx->tx_buffer = (void *)tx_start;
-      tx->flags = SPI_TRANS_MODE_DIO;
-
-      ret = spi_device_queue_trans(spi, tx, portMAX_DELAY);
-      ESP_ERROR_CHECK(ret);
-
-      tx_count++;
-      tx_start = out;
+      out += 3 * 6 * 8;
     }
+    xSemaphoreGive(pixel_buffer_mutex);
   }
-  // Send RCLK edge to output last byte.
+  // Make sure we send a final RCLK edge to clock last bit into pixels.
   INTERLEAVE(0x00, out);
   out += 2;
 
-  spi_transaction_t *tx = &txns[tx_count];
-  memset(tx, 0, sizeof(spi_transaction_t));
-  tx->length = 8 * (out - tx_start);
-  tx->tx_buffer = (void *)tx_start;
-  tx->flags = SPI_TRANS_MODE_DIO;
+  total_time_spent += (esp_timer_get_time() - start);
 
-  ret = spi_device_queue_trans(spi, tx, portMAX_DELAY);
-  ESP_ERROR_CHECK(ret);
-
-  tx_count++;
-
-  uint64_t end = esp_timer_get_time();
-
-  total_time_spent += (end - start);
-
+#ifdef PRINT_TIMING_DEBUG
   if (led_strips_animation_cycle % 60 == 0) {
     ESP_LOGI(TAG, "Time spent mapping: %jdus", total_time_spent / 60);
     total_time_spent = 0;
   }
+#endif
 
+  // Total data written should be the same length as the DMA buffer.
   if (out != dma_buffer + dma_buffer_size) {
     ESP_LOGE(TAG, "Invalid out pointer after dma buffer generation.");
   }
 
-  // Wait for all the transactions to complete.
-  spi_transaction_t *tx_result;
-  for (uint8_t i = 0; i < tx_count; i++) {
-    ret = spi_device_get_trans_result(spi, &tx_result, portMAX_DELAY);
-    ESP_ERROR_CHECK(ret);
-  }
+  spi_transaction_t tx;
+  memset(&tx, 0, sizeof(spi_transaction_t));
+  // SPI transaction length is in bits!
+  tx.length = 8 * dma_buffer_size;
+  tx.tx_buffer = (void *)dma_buffer;
+  // Drive 4x data lines.
+  tx.flags = SPI_TRANS_MODE_QIO;
+
+  // Disable interrupts while we're sending SPI so nothing gets interrupted.
+  portDISABLE_INTERRUPTS();
+  esp_err_t ret = spi_device_polling_transmit(spi, &tx);
+  portENABLE_INTERRUPTS();
+
+  ESP_ERROR_CHECK(ret);
 }
 
 static void led_strips_update_task(void *params) {
+  led_strips_initialize();
+
   TickType_t delay_ticks = (1000 / led_update_frequency) / portTICK_PERIOD_MS;
   TickType_t last_wake_time = xTaskGetTickCount();
   for (;;) {
     vTaskDelayUntil(&last_wake_time, delay_ticks);
 
+#ifdef PRINT_TIMING_DEBUG
     uint64_t animation_start = esp_timer_get_time();
+#endif
+
+#ifdef BUILT_IN_ANIMATIONS
     led_strips_animation_tick();
+#endif
+
+#ifdef PRINT_TIMING_DEBUG
     uint64_t update_start = esp_timer_get_time();
+#endif
+
     led_strips_update();
+
+#ifdef PRINT_TIMING_DEBUG
     uint64_t end = esp_timer_get_time();
     if (led_strips_animation_cycle % 60 == 0) {
       ESP_LOGI(TAG,
@@ -309,27 +298,39 @@ static void led_strips_update_task(void *params) {
                update_start - animation_start,
                end - update_start);
     }
+#endif
+  }
+}
+
+void led_strips_bulk_update(uint8_t port,
+                            uint16_t start_index,
+                            uint16_t count,
+                            rgb_t *data) {
+  if (port < 1 || port > PORT_COUNT) {
+    ESP_LOGE(TAG, "Invalid port %d, must be in range [1, 8]", port);
+  }
+  if (start_index >= LEDS_PER_PORT || start_index + count > LEDS_PER_PORT) {
+    ESP_LOGE(TAG,
+             "Invalid LED range [%d, %d], must be in range [0, %d]",
+             start_index,
+             start_index + count - 1,
+             LEDS_PER_PORT - 1);
+  }
+  if (xSemaphoreTake(pixel_buffer_mutex, portMAX_DELAY) == pdTRUE) {
+    // We've defined the UDP packet format so it can be directly memcpy'd from
+    // the packet buffer!
+    memcpy(&pixel_buffer[port - 1][start_index], data, 3 * count);
+    xSemaphoreGive(pixel_buffer_mutex);
   }
 }
 
 void led_strips_start_update_task() {
-  ESP_LOGI(TAG, "Starting update task...");
+  ESP_LOGI(TAG, "Starting LED update task...");
   xTaskCreatePinnedToCore(led_strips_update_task,
                           "led_strips_update",
                           4096,
                           NULL,
-                          4 /* Priority */,
+                          20 /* Priority */,
                           &led_update_task_handle,
                           1 /* CPU affinity */);
 }
-
-/* Debugging: output Qc and Qd are dead, also Qa starts at port index 2. */
-
-// Qa red
-// Qb green
-// Qc no output
-// Qd no output
-// Qe blue
-// Qf yellow
-// Qg cyan
-// Qh magneta
