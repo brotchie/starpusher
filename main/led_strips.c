@@ -27,7 +27,7 @@ static const char *TAG = "led_strips";
 
 #define SPI_MAX_TRANSFER_SIZE 71282
 
-// Drive SPI clock at 11Mhz. At 13Mhz is starts to glitch
+// Drive SPI clock at 11Mhz. At 13Mhz it starts to glitch
 // out a LED strip of length 495. At 10MHz is doesn't fit
 // in the 13.3ms time bound for 60FPS.
 #define SR_SRCLK_FREQUENCY SPI_MASTER_FREQ_11M
@@ -98,9 +98,12 @@ void led_strips_animation_tick() {
   }
 }
 
-// Here we've calculated pre-calculated the interleaving of all possible bytes
-// into the packed format for quad-SPI DMA. This trades off memory (512 bytes)
-// for a bunch of shift and masking operations.
+// Here we've pre-calculated the interleaving of all possible bytes into the
+// packed format for quad-SPI DMA. This trades off memory (512 bytes) to save
+// a bunch of shift and masking operations.
+//
+// These values also include bits for the shift register clock signal on SPI
+// DATA0 and the empty last channel of quad-SPI on SPI DATA3.
 static const uint16_t interleave_table_little_endian[256] = {
     0x0010, 0x0410, 0x4010, 0x4410, 0x0014, 0x0414, 0x4014, 0x4414, 0x0050,
     0x0450, 0x4050, 0x4450, 0x0054, 0x0454, 0x4054, 0x4454, 0x0210, 0x0610,
@@ -160,8 +163,9 @@ void led_strips_initialize() {
   led_strips_animation_tick();
 #endif
   // Allocate DMA buffer.
-  // Multiply by 2 for 2bit wide data line on SPI bus,
-  // Multiply by 3 because 24bit color per LED,
+  // Multiply by 2 because we're using quad-SPI with 4 bits to SR0, 4 bits
+  //     to SR1, 4 bits for RCLK, and 4 bits of zeros for unused SPI DATA3.
+  // Multiply by 3 because 24 bit color per LED,
   // Multiply by 3 because 1 logical bit maps to 3 physical bits on LEDs,
   // Add 2 because we need to clock out the final pixels value and then
   // clock out zeros from the shift register outputs.
