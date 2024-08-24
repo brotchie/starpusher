@@ -209,11 +209,13 @@ uint16_t ticks_since_last_color_lightning = 0;
 uint16_t second_shot_countdown = 0;
 
 rgb_t color_lightning_get_pixel_value(uint16_t index) {
-  if (ticks_since_last_color_lightning == 5 || ticks_since_last_color_lightning == 8) {
+  if (ticks_since_last_color_lightning == 5 ||
+      ticks_since_last_color_lightning == 8) {
     rgb_t white = {.r = 255, .g = 255, .b = 255};
     return white;
-  } 
-  if (ticks_since_last_color_lightning == 6 || ticks_since_last_color_lightning == 7) {
+  }
+  if (ticks_since_last_color_lightning == 6 ||
+      ticks_since_last_color_lightning == 7) {
     rgb_t black = {.r = 0, .g = 0, .b = 0};
     return black;
   } else {
@@ -239,4 +241,10 @@ void color_lightning_tick(uint16_t animation_cycle) {
     current_color_lightning = last_color_lightning;
     second_shot_countdown = rand() % 30 + 15;
   }
+}
+
+void scale_color(float scale, rgb_t base, rgb_t *target) {
+  target->r = scale * base.r;
+  target->g = scale * base.g;
+  target->b = scale * base.b;
 }

@@ -1,19 +1,25 @@
 #include "color.h"
 #include "viz.h"
 
-#define STAR_LED_COUNT 45
-#define STAR_1_START 196
-#define STAR_2_START (STAR_1_START + 45)
-#define STAR_2_END (STAR_2_START + 45)
+// #define STAR_LED_COUNT 45
+// #define STAR_1_START 196
+// #define STAR_2_START (STAR_1_START + 45)
+// #define STAR_2_END (STAR_2_START + 45)
 
 typedef struct {
   vizualization_t viz;
   uint32_t animation_cycle;
   double star_sparkle_probability;
+  led_segment_t totem_segment;
+  led_segment_t star1_segment;
+  led_segment_t star2_segment;
 } starburst_vizualization_t;
 
 void starburst_initialize(starburst_vizualization_t *viz, led_info_t led_info) {
   viz->star_sparkle_probability = 0.2;
+  viz->totem_segment = led_info.segments[0];
+  viz->star1_segment = led_info.segments[1];
+  viz->star2_segment = led_info.segments[2];
 }
 void starburst_deinitialize(starburst_vizualization_t *viz) {}
 
@@ -24,7 +30,9 @@ void starburst_get_pixel_values(starburst_vizualization_t *viz,
                                 rgb_t *pixels,
                                 uint16_t pixel_count) {
   uint32_t offset = viz->animation_cycle % ((pixel_count / 3) + 200);
-  for (uint16_t index = 0; index < STAR_1_START; index++) {
+  for (uint16_t index = viz->totem_segment.start_index;
+       index < viz->totem_segment.end_index;
+       index++) {
     if (index / 3 == offset) {
       double hue = (double)((index + viz->animation_cycle) % pixel_count) /
                    (double)pixel_count;
@@ -38,7 +46,9 @@ void starburst_get_pixel_values(starburst_vizualization_t *viz,
 
   uint16_t sparkle_mod = 1 / viz->star_sparkle_probability;
 
-  for (uint16_t index = STAR_1_START; index < STAR_2_END; index++) {
+  for (uint16_t index = viz->star1_segment.start_index;
+       index < viz->star2_segment.end_index;
+       index++) {
     if (offset > 65 && offset < 90) {
       uint16_t ticks_since_star_shine = offset - 65;
       if (ticks_since_star_shine == 5 || ticks_since_star_shine == 8) {

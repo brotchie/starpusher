@@ -31,4 +31,6 @@ void prob_weight_buffer_tick(uint16_t animation_cycle);
 
 rgb_t color_lightning_get_pixel_value(uint16_t index);
 void color_lightning_tick(uint16_t animation_cycle);
+
+void scale_color(float scale, rgb_t base, rgb_t *target);
 #endif
